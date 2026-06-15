@@ -18,6 +18,7 @@
 #include "engine/Vec2.h"
 #include "engine/Color.h"
 #include "Config.h"
+#include "Face.h"
 
 #include <SDL.h>
 #include <cmath>
@@ -26,6 +27,9 @@
 
 using namespace eng;
 namespace cfg = haul::cfg;
+using haul::FaceState;
+using haul::drawFace;
+using haul::faceLabel;
 
 namespace {
 
@@ -65,6 +69,7 @@ bool loadHudFont(Font& font, int pt) {
 class HaulGame : public Game {
 public:
     void setAutoplay(bool b) { autoplay_ = b; }
+    void setGallery(bool b) { gallery_ = b; }
 
     void init(Renderer& r) override {
         arenaW_ = static_cast<float>(r.width());
@@ -148,6 +153,8 @@ public:
     }
 
     void render(Renderer& r) override {
+        if (gallery_) { renderGallery(r); return; }
+
         r.clear({18, 18, 26, 255});
 
         bool inZone = player_.x >= zone_.x && player_.x <= zone_.x + zone_.w &&
@@ -205,6 +212,8 @@ public:
                            arenaH_ * 0.5f + 22.f, {180, 255, 190, 255});
             }
         }
+
+        drawPortrait(r);  // emotes on top of everything, incl. the death screen
     }
 
     bool wantsQuit() const override { return quit_; }
@@ -216,6 +225,64 @@ public:
 
 private:
     struct Rect { float x, y, w, h; };
+
+    // Derives the character's expression from live game state. Priority:
+    // dead > just-banked > panic > scared > greedy > neutral.
+    FaceState computeFace() const {
+        if (gameOver_) return FaceState::Dead;
+        if (bankFlash_ > 0.f) return FaceState::Happy;
+        float nd = 1e9f;
+        bool aggroNear = false;
+        for (const auto& e : enemies_) {
+            float d = (e.pos - player_).length();
+            if (d < nd) nd = d;
+            if (e.aggro && d < cfg::RoamerAggroRange) aggroNear = true;
+        }
+        float hp = health_ / cfg::PlayerMaxHealth;
+        if (hp < 0.30f || (aggroNear && nd < 110.f)) return FaceState::Panic;
+        if (aggroNear) return FaceState::Scared;
+        if (carriedValue_ > 0) return FaceState::Greedy;
+        return FaceState::Neutral;
+    }
+
+    void drawPortrait(Renderer& r) {
+        const float pw = 104.f, ph = 104.f;
+        const float px = arenaW_ - cfg::ArenaMargin - pw - 6.f;
+        const float py = cfg::ArenaMargin + 6.f;
+        FaceState s = computeFace();
+
+        r.fillRect(px, py, pw, ph, {28, 28, 38, 255});
+        Color border{90, 90, 110, 255};
+        if (s == FaceState::Panic || s == FaceState::Dead)        border = {220, 70, 70, 255};
+        else if (s == FaceState::Greedy || s == FaceState::Happy) border = {230, 200, 90, 255};
+        else if (s == FaceState::Scared)                          border = {120, 160, 230, 255};
+        r.outlineRect(px, py, pw, ph, border, 3);
+
+        drawFace(r, s, px + 6.f, py + 2.f, pw - 12.f, ph - 22.f);
+        if (font_.valid()) {
+            std::string lbl = faceLabel(s);
+            font_.draw(r, lbl, px + pw * 0.5f - lbl.size() * 4.5f, py + ph - 22.f, border);
+        }
+    }
+
+    void renderGallery(Renderer& r) {
+        r.clear({18, 18, 26, 255});
+        const FaceState all[6] = {FaceState::Neutral, FaceState::Greedy, FaceState::Scared,
+                                  FaceState::Panic, FaceState::Happy, FaceState::Dead};
+        const float cellW = arenaW_ / 6.f;
+        const float size = 118.f;
+        for (int i = 0; i < 6; ++i) {
+            float cx = cellW * i + cellW * 0.5f;
+            float fy = arenaH_ * 0.5f - size * 0.5f - 10.f;
+            drawFace(r, all[i], cx - size * 0.5f, fy, size, size);
+            if (font_.valid()) {
+                std::string lbl = faceLabel(all[i]);
+                font_.draw(r, lbl, cx - lbl.size() * 4.5f, fy + size + 8.f, {200, 200, 220, 255});
+            }
+        }
+        if (bigFont_.valid())
+            bigFont_.draw(r, "HAUL  -  reactive faces", 30.f, 36.f, {230, 230, 240, 255});
+    }
 
     // 0..1 pseudo-random, small LCG. Deterministic given the seed.
     float randf() {
@@ -387,6 +454,7 @@ private:
 
     unsigned rng_ = 1u;
     bool autoplay_ = false;
+    bool gallery_ = false;
     bool quit_ = false;
 
     Font font_;
@@ -400,6 +468,7 @@ int main(int argc, char** argv) {
     cfg.height = 600;
 
     bool demo = false;
+    bool gallery = false;
     int frames = -1;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -408,6 +477,8 @@ int main(int argc, char** argv) {
             cfg.screenshotPath = argv[++i];
         } else if (arg == "--demo") {
             demo = true;
+        } else if (arg == "--faces") {
+            gallery = true;
         } else if (arg == "--frames" && i + 1 < argc) {
             frames = std::atoi(argv[++i]);
         }
@@ -417,6 +488,7 @@ int main(int argc, char** argv) {
 
     HaulGame game;
     game.setAutoplay(demo);
+    game.setGallery(gallery);
     App app(cfg);
     return app.run(game);
 }

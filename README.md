@@ -48,6 +48,12 @@ green **EXTRACT** zone to bank it, **Esc** to quit.
 The engine can render offscreen (no display needed):
 
 ```sh
-./gamedev/build/games/haul/haul --screenshot frame.png   # one frame to PNG
-./gamedev/build/games/haul/haul --demo --screenshot f.png # let a bot play first
+./gamedev/build/games/haul/haul --screenshot frame.png       # one frame to PNG
+./gamedev/build/games/haul/haul --demo --screenshot f.png    # let a bot play first
+./gamedev/build/games/haul/haul --demo --frames 600 --screenshot f.png  # bot runs N steps
+./gamedev/build/games/haul/haul --faces --screenshot f.png   # the reactive-face gallery
 ```
+
+The character has a reactive face (a portrait in the top-right corner) that
+emotes from live game state: greedy near loot, scared/panicking when chased,
+cha-ching on a deposit, dead on game over.

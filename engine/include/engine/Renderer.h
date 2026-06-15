@@ -17,6 +17,8 @@ public:
     void fillRect(float x, float y, float w, float h, Color c);
     void fillRectCentered(Vec2 center, Vec2 size, Color c);
     void outlineRect(float x, float y, float w, float h, Color c, int thickness = 2);
+    void drawLine(float x1, float y1, float x2, float y2, Color c, int thickness = 1);
+    void fillCircle(float cx, float cy, float radius, Color c);
     void present();
 
     // Reads the current framebuffer back and writes it to a PNG. Works for

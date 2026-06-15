@@ -1,5 +1,6 @@
 #include "engine/Renderer.h"
 #include <SDL_image.h>
+#include <cmath>
 
 namespace eng {
 
@@ -26,6 +27,36 @@ void Renderer::outlineRect(float x, float y, float w, float h, Color c, int thic
     for (int i = 0; i < thickness; ++i) {
         SDL_FRect rect{x + i, y + i, w - 2 * i, h - 2 * i};
         SDL_RenderDrawRectF(sdl_, &rect);
+    }
+}
+
+void Renderer::drawLine(float x1, float y1, float x2, float y2, Color c, int thickness) {
+    SDL_SetRenderDrawColor(sdl_, c.r, c.g, c.b, c.a);
+    if (thickness <= 1) {
+        SDL_RenderDrawLineF(sdl_, x1, y1, x2, y2);
+        return;
+    }
+    // Thicken by drawing parallel lines offset along the perpendicular.
+    float dx = x2 - x1, dy = y2 - y1;
+    float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 1e-6f) {
+        SDL_RenderDrawLineF(sdl_, x1, y1, x2, y2);
+        return;
+    }
+    float nx = -dy / len, ny = dx / len;
+    for (int i = 0; i < thickness; ++i) {
+        float off = i - (thickness - 1) * 0.5f;
+        SDL_RenderDrawLineF(sdl_, x1 + nx * off, y1 + ny * off, x2 + nx * off, y2 + ny * off);
+    }
+}
+
+void Renderer::fillCircle(float cx, float cy, float radius, Color c) {
+    SDL_SetRenderDrawColor(sdl_, c.r, c.g, c.b, c.a);
+    int r0 = static_cast<int>(radius);
+    for (int dy = -r0; dy <= r0; ++dy) {
+        float dx = std::sqrt(radius * radius - static_cast<float>(dy) * dy);
+        SDL_FRect row{cx - dx, cy + dy, 2 * dx, 1.f};
+        SDL_RenderFillRectF(sdl_, &row);
     }
 }
 
