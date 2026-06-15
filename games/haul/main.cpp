@@ -1,10 +1,14 @@
 // HAUL (working title) -- a co-op scavenger game: grab loot, weight slows you
 // down, haul it to the extraction zone, bank it for cash, push your luck.
 //
-// Milestone 1: the GREED LOOP. Walk over loot to pick it up (value + weight
-// accumulate), the more you carry the slower you move, and standing on the
-// extraction zone banks your carried value into cash. No danger yet -- that's
-// next. Run with `--demo` to let a simple bot play it for a screenshot.
+// Milestone 2: DANGER. Roaming enemies wander the arena and chase when you get
+// close, dealing contact damage. Run out of health and it's game over -- you
+// forfeit the loot you were carrying, but banked cash is safe. A danger meter
+// climbs over time, spawning more (and faster) enemies, so lingering for "one
+// more" item gets riskier the longer you stay.
+//
+// Flags: `--screenshot out.png` renders one frame headless; `--demo` lets a bot
+// play (it flees nearby enemies); `--frames N` sets how long the bot runs first.
 
 #include "engine/App.h"
 #include "engine/Game.h"
@@ -16,6 +20,7 @@
 #include "Config.h"
 
 #include <SDL.h>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -33,9 +38,13 @@ struct LootItem {
     bool collected = false;
 };
 
-float dist(Vec2 a, Vec2 b) { return (a - b).length(); }
+struct Roamer {
+    Vec2 pos;
+    Vec2 heading{1.f, 0.f};
+    float wanderTimer = 0.f;
+    bool aggro = false;
+};
 
-// Picks a font from bundled assets first, then common system locations.
 bool loadHudFont(Font& font, int pt) {
     std::vector<std::string> paths;
     if (char* base = SDL_GetBasePath()) {
@@ -60,55 +69,43 @@ public:
     void init(Renderer& r) override {
         arenaW_ = static_cast<float>(r.width());
         arenaH_ = static_cast<float>(r.height());
-        player_ = {arenaW_ * 0.5f, arenaH_ * 0.5f};
-
         zone_ = {cfg::ArenaMargin + 6.f, arenaH_ - cfg::ArenaMargin - 132.f, 152.f, 126.f};
 
         loadHudFont(font_, 18);
-        loadHudFont(bigFont_, 26);
+        loadHudFont(bigFont_, 30);
 
-        // Deterministic scatter so screenshots are reproducible.
-        unsigned seed = 1337u;
-        auto rnd = [&seed]() {
-            seed = seed * 1103515245u + 12345u;
-            return (seed >> 16) & 0x7fff;
-        };
-        const int spanX = static_cast<int>(arenaW_ - 2 * cfg::ArenaMargin - 40);
-        const int spanY = static_cast<int>(arenaH_ - 2 * cfg::ArenaMargin - 40);
-        for (int i = 0; i < cfg::LootCount; ++i) {
-            float x = cfg::ArenaMargin + 20 + (rnd() % spanX);
-            float y = cfg::ArenaMargin + 20 + (rnd() % spanY);
-            const cfg::Tier& t = cfg::Tiers[rnd() % 3];
-            float s = 14.f + (t.value >= 80 ? 12.f : (t.value >= 30 ? 6.f : 0.f));
-            loot_.push_back({{x, y}, {s, s}, t.value, t.weight, {t.r, t.g, t.b, 255}});
-        }
+        rng_ = 20260615u;  // deterministic so the first screenshot is stable
+        startRun();
     }
 
     void update(float dt, const Input& in) override {
-        Vec2 dir = autoplay_ ? autopilotDir() : inputDir(in);
+        if (gameOver_) {
+            if (in.down(SDL_SCANCODE_R) || in.down(SDL_SCANCODE_RETURN)) startRun();
+            if (in.down(SDL_SCANCODE_ESCAPE)) quit_ = true;
+            return;
+        }
 
+        // --- movement (weight-penalized) ---
+        Vec2 dir = autoplay_ ? autopilotDir() : inputDir(in);
         if (dir.x != 0.f || dir.y != 0.f) {
             float speed = cfg::PlayerBaseSpeed * cfg::weightPenalty(carriedWeight_);
             player_ += dir.normalized() * (speed * dt);
         }
-
         const float lo = cfg::ArenaMargin + cfg::PlayerSize * 0.5f;
-        if (player_.x < lo)           player_.x = lo;
-        if (player_.x > arenaW_ - lo) player_.x = arenaW_ - lo;
-        if (player_.y < lo)           player_.y = lo;
-        if (player_.y > arenaH_ - lo) player_.y = arenaH_ - lo;
+        player_.x = cfg::clampf(player_.x, lo, arenaW_ - lo);
+        player_.y = cfg::clampf(player_.y, lo, arenaH_ - lo);
 
-        // Pick up any loot within reach.
+        // --- pickup ---
         for (auto& l : loot_) {
             if (l.collected) continue;
-            if (dist(player_, l.pos) <= cfg::PickupRadius + l.size.x * 0.5f) {
+            if ((player_ - l.pos).length() <= cfg::PickupRadius + l.size.x * 0.5f) {
                 l.collected = true;
                 carriedValue_ += l.value;
                 carriedWeight_ += l.weight;
             }
         }
 
-        // Bank carried loot when standing in the extraction zone.
+        // --- banking ---
         bool inZone = player_.x >= zone_.x && player_.x <= zone_.x + zone_.w &&
                       player_.y >= zone_.y && player_.y <= zone_.y + zone_.h;
         if (inZone && carriedValue_ > 0) {
@@ -118,6 +115,34 @@ public:
             bankFlash_ = 0.6f;
         }
         if (bankFlash_ > 0.f) bankFlash_ -= dt;
+
+        // --- danger meter + escalating spawns ---
+        danger_ = cfg::clampf(danger_ + cfg::DangerRisePerSec * dt, 0.f, 1.f);
+        while (nextThreshold_ < 3 && danger_ >= cfg::DangerThresholds[nextThreshold_]) {
+            spawnRoamer();
+            ++nextThreshold_;
+        }
+
+        // --- enemies ---
+        for (auto& e : enemies_) updateRoamer(e, dt);
+
+        // --- damage ---
+        if (iframe_ > 0.f) iframe_ -= dt;
+        for (const auto& e : enemies_) {
+            bool hit = std::fabs(e.pos.x - player_.x) < (cfg::PlayerSize + cfg::RoamerSize) * 0.5f &&
+                       std::fabs(e.pos.y - player_.y) < (cfg::PlayerSize + cfg::RoamerSize) * 0.5f;
+            if (hit && iframe_ <= 0.f) {
+                health_ -= cfg::RoamerDamage;
+                iframe_ = cfg::IFrameSeconds;
+                if (health_ <= 0.f) {
+                    health_ = 0.f;
+                    gameOver_ = true;          // forfeit carried loot; cash kept
+                    carriedValue_ = 0;
+                    carriedWeight_ = 0.f;
+                }
+                break;
+            }
+        }
 
         if (in.down(SDL_SCANCODE_ESCAPE)) quit_ = true;
     }
@@ -132,7 +157,6 @@ public:
                       arenaW_ - 2 * cfg::ArenaMargin, arenaH_ - 2 * cfg::ArenaMargin,
                       {64, 64, 86, 255}, 2);
 
-        // Extraction zone, brighter when occupied or flashing from a deposit.
         Color zoneFill = (inZone || bankFlash_ > 0.f) ? Color{36, 92, 56, 255}
                                                        : Color{26, 60, 40, 255};
         r.fillRect(zone_.x, zone_.y, zone_.w, zone_.h, zoneFill);
@@ -146,16 +170,41 @@ public:
             if (!l.collected) r.fillRectCentered(l.pos, l.size, l.color);
         }
 
-        // Player tints toward heavy/orange as the load grows.
-        float load = carriedWeight_ / cfg::MaxWeight;
-        Color pcol{static_cast<unsigned char>(220 + 35 * (load > 1.f ? 1.f : load)),
-                   static_cast<unsigned char>(80 + 40 * (load > 1.f ? 1.f : load)),
-                   70, 255};
-        r.fillRectCentered(player_, {cfg::PlayerSize, cfg::PlayerSize}, pcol);
-        r.outlineRect(player_.x - cfg::PlayerSize * 0.5f, player_.y - cfg::PlayerSize * 0.5f,
-                      cfg::PlayerSize, cfg::PlayerSize, {255, 255, 255, 255}, 2);
+        // Enemies: crimson body, yellow warning outline (brighter when chasing).
+        for (const auto& e : enemies_) {
+            r.fillRectCentered(e.pos, {cfg::RoamerSize, cfg::RoamerSize}, {200, 40, 52, 255});
+            Color outline = e.aggro ? Color{255, 230, 60, 255} : Color{150, 120, 40, 255};
+            r.outlineRect(e.pos.x - cfg::RoamerSize * 0.5f, e.pos.y - cfg::RoamerSize * 0.5f,
+                          cfg::RoamerSize, cfg::RoamerSize, outline, 3);
+        }
+
+        // Player: tints toward heavy/orange as load grows; flashes during i-frames.
+        float load = cfg::clampf(carriedWeight_ / cfg::MaxWeight, 0.f, 1.f);
+        Color pcol{static_cast<unsigned char>(70 + 150 * (1.f - load)),
+                   static_cast<unsigned char>(170 - 90 * load),
+                   static_cast<unsigned char>(230 - 120 * load), 255};
+        bool blink = iframe_ > 0.f && (static_cast<int>(iframe_ * 20.f) % 2 == 0);
+        if (!blink) {
+            r.fillRectCentered(player_, {cfg::PlayerSize, cfg::PlayerSize}, pcol);
+            r.outlineRect(player_.x - cfg::PlayerSize * 0.5f, player_.y - cfg::PlayerSize * 0.5f,
+                          cfg::PlayerSize, cfg::PlayerSize, {255, 255, 255, 255}, 2);
+        }
 
         drawHud(r);
+
+        if (gameOver_) {
+            r.fillRect(0, 0, arenaW_, arenaH_, {0, 0, 0, 175});
+            if (bigFont_.valid())
+                bigFont_.draw(r, "YOU DIED", arenaW_ * 0.5f - 78.f, arenaH_ * 0.5f - 60.f,
+                              {255, 90, 90, 255});
+            if (font_.valid()) {
+                font_.draw(r, "Banked $" + std::to_string(cash_) +
+                                  " is safe. Carried loot lost.",
+                           arenaW_ * 0.5f - 168.f, arenaH_ * 0.5f - 8.f, {220, 220, 230, 255});
+                font_.draw(r, "Press R to dive again", arenaW_ * 0.5f - 96.f,
+                           arenaH_ * 0.5f + 22.f, {180, 255, 190, 255});
+            }
+        }
     }
 
     bool wantsQuit() const override { return quit_; }
@@ -168,6 +217,90 @@ public:
 private:
     struct Rect { float x, y, w, h; };
 
+    // 0..1 pseudo-random, small LCG. Deterministic given the seed.
+    float randf() {
+        rng_ = rng_ * 1664525u + 1013904223u;
+        return ((rng_ >> 8) & 0xFFFFFF) / static_cast<float>(0x1000000);
+    }
+
+    void startRun() {
+        player_ = {arenaW_ * 0.5f, arenaH_ * 0.5f};
+        health_ = cfg::PlayerMaxHealth;
+        carriedValue_ = 0;
+        carriedWeight_ = 0.f;
+        iframe_ = 0.f;
+        danger_ = 0.f;
+        nextThreshold_ = 0;
+        bankFlash_ = 0.f;
+        gameOver_ = false;
+
+        loot_.clear();
+        spawnLoot();
+        enemies_.clear();
+        for (int i = 0; i < cfg::RoamerCountBase; ++i) spawnRoamer();
+    }
+
+    void spawnLoot() {
+        const int spanX = static_cast<int>(arenaW_ - 2 * cfg::ArenaMargin - 40);
+        const int spanY = static_cast<int>(arenaH_ - 2 * cfg::ArenaMargin - 40);
+        for (int i = 0; i < cfg::LootCount; ++i) {
+            float x = cfg::ArenaMargin + 20.f + randf() * spanX;
+            float y = cfg::ArenaMargin + 20.f + randf() * spanY;
+            int ti = static_cast<int>(randf() * 3.f);
+            if (ti > 2) ti = 2;
+            const cfg::Tier& t = cfg::Tiers[ti];
+            float s = 14.f + (t.value >= 80 ? 12.f : (t.value >= 30 ? 6.f : 0.f));
+            loot_.push_back({{x, y}, {s, s}, t.value, t.weight, {t.r, t.g, t.b, 255}});
+        }
+    }
+
+    void spawnRoamer() {
+        Roamer e;
+        const float lo = cfg::ArenaMargin + cfg::RoamerSize;
+        for (int tries = 0; tries < 30; ++tries) {
+            e.pos = {lo + randf() * (arenaW_ - 2 * lo), lo + randf() * (arenaH_ - 2 * lo)};
+            if ((e.pos - player_).length() < 190.f) continue;          // not on the player
+            if (e.pos.x >= zone_.x - 24 && e.pos.x <= zone_.x + zone_.w + 24 &&
+                e.pos.y >= zone_.y - 24 && e.pos.y <= zone_.y + zone_.h + 24) continue;  // not in zone
+            break;
+        }
+        float ang = randf() * 6.2831853f;
+        e.heading = {std::cos(ang), std::sin(ang)};
+        e.wanderTimer = 0.5f + randf() * 1.5f;
+        enemies_.push_back(e);
+    }
+
+    void updateRoamer(Roamer& e, float dt) {
+        Vec2 toPlayer = player_ - e.pos;
+        float d = toPlayer.length();
+        e.aggro = d < cfg::RoamerAggroRange;
+
+        Vec2 dir;
+        float spd;
+        if (e.aggro) {
+            dir = toPlayer.normalized();
+            spd = cfg::RoamerChaseSpeed * (1.f + danger_ * cfg::DangerSpeedBonus);
+            e.heading = dir;
+        } else {
+            e.wanderTimer -= dt;
+            if (e.wanderTimer <= 0.f) {
+                float ang = randf() * 6.2831853f;
+                e.heading = {std::cos(ang), std::sin(ang)};
+                e.wanderTimer = 1.0f + randf() * 2.0f;
+            }
+            dir = e.heading;
+            spd = cfg::RoamerWanderSpeed;
+        }
+        e.pos += dir * (spd * dt);
+
+        // Bounce off the arena bounds.
+        const float b = cfg::ArenaMargin + cfg::RoamerSize * 0.5f;
+        if (e.pos.x < b)            { e.pos.x = b;            e.heading.x = std::fabs(e.heading.x); }
+        if (e.pos.x > arenaW_ - b)  { e.pos.x = arenaW_ - b;  e.heading.x = -std::fabs(e.heading.x); }
+        if (e.pos.y < b)            { e.pos.y = b;            e.heading.y = std::fabs(e.heading.y); }
+        if (e.pos.y > arenaH_ - b)  { e.pos.y = arenaH_ - b;  e.heading.y = -std::fabs(e.heading.y); }
+    }
+
     Vec2 inputDir(const Input& in) const {
         Vec2 d{0.f, 0.f};
         if (in.down(SDL_SCANCODE_W) || in.down(SDL_SCANCODE_UP))    d.y -= 1.f;
@@ -177,57 +310,82 @@ private:
         return d;
     }
 
-    // Simple greedy bot: grab the nearest loot until fairly loaded, then go
-    // bank it. Just enough to demonstrate the loop in a headless screenshot.
+    // Greedy-but-cowardly bot: flee a close enemy, else bank when loaded, else
+    // grab the nearest loot. Enough to show the loop in a headless screenshot.
     Vec2 autopilotDir() {
-        Vec2 zoneCenter{zone_.x + zone_.w * 0.5f, zone_.y + zone_.h * 0.5f};
-        if (carriedWeight_ >= cfg::MaxWeight * 0.6f) {
-            return zoneCenter - player_;
+        const Roamer* threat = nullptr;
+        float td = 1e9f;
+        for (const auto& e : enemies_) {
+            float d = (e.pos - player_).length();
+            if (d < td) { td = d; threat = &e; }
         }
+        if (threat && td < 150.f) return player_ - threat->pos;  // panic
+
+        Vec2 zoneCenter{zone_.x + zone_.w * 0.5f, zone_.y + zone_.h * 0.5f};
+        if (carriedWeight_ >= cfg::MaxWeight * 0.6f) return zoneCenter - player_;
+
         const LootItem* best = nullptr;
-        float bestD = 1e9f;
+        float bd = 1e9f;
         for (const auto& l : loot_) {
             if (l.collected) continue;
-            float d = dist(player_, l.pos);
-            if (d < bestD) { bestD = d; best = &l; }
+            float d = (l.pos - player_).length();
+            if (d < bd) { bd = d; best = &l; }
         }
         if (best) return best->pos - player_;
-        return zoneCenter - player_;  // nothing left: go bank
+        return zoneCenter - player_;
+    }
+
+    void drawBar(Renderer& r, float x, float y, float frac, Color fill, const std::string& label) {
+        const float w = 200.f, h = 16.f;
+        frac = cfg::clampf(frac, 0.f, 1.f);
+        r.fillRect(x, y, w, h, {40, 40, 52, 255});
+        r.fillRect(x, y, w * frac, h, fill);
+        r.outlineRect(x, y, w, h, {90, 90, 110, 255}, 1);
+        if (font_.valid()) font_.draw(r, label, x + w + 10.f, y - 2.f, {150, 150, 170, 255});
     }
 
     void drawHud(Renderer& r) {
         if (!font_.valid()) return;
-
-        font_.draw(r, "CASH  $" + std::to_string(cash_), 34.f, 30.f, {255, 220, 120, 255});
-        font_.draw(r, "CARRYING  $" + std::to_string(carriedValue_), 34.f, 54.f,
+        font_.draw(r, "CASH  $" + std::to_string(cash_), 34.f, 24.f, {255, 220, 120, 255});
+        font_.draw(r, "CARRYING  $" + std::to_string(carriedValue_), 34.f, 48.f,
                    {200, 200, 220, 255});
 
-        // Weight bar: green -> red as you approach/exceed capacity.
-        float load = carriedWeight_ / cfg::MaxWeight;
-        if (load > 1.f) load = 1.f;
-        const float bx = 34.f, by = 84.f, bw = 220.f, bh = 16.f;
-        r.fillRect(bx, by, bw, bh, {40, 40, 52, 255});
-        unsigned char rr = static_cast<unsigned char>(70 + 170 * load);
-        unsigned char gg = static_cast<unsigned char>(200 - 150 * load);
-        r.fillRect(bx, by, bw * load, bh, {rr, gg, 70, 255});
-        r.outlineRect(bx, by, bw, bh, {90, 90, 110, 255}, 1);
-        font_.draw(r, "WEIGHT", bx + bw + 10.f, by - 2.f, {150, 150, 170, 255});
+        float hp = health_ / cfg::PlayerMaxHealth;
+        drawBar(r, 34.f, 78.f, hp,
+                {static_cast<unsigned char>(220 - 150 * hp),
+                 static_cast<unsigned char>(70 + 150 * hp), 80, 255}, "HEALTH");
 
-        if (bankFlash_ > 0.f && bigFont_.valid()) {
-            bigFont_.draw(r, "BANKED!", zone_.x + 14.f, zone_.y - 34.f, {120, 255, 160, 255});
-        }
+        float load = carriedWeight_ / cfg::MaxWeight;
+        drawBar(r, 34.f, 102.f, load,
+                {static_cast<unsigned char>(70 + 170 * cfg::clampf(load, 0.f, 1.f)),
+                 static_cast<unsigned char>(200 - 150 * cfg::clampf(load, 0.f, 1.f)), 70, 255},
+                "WEIGHT");
+
+        drawBar(r, 34.f, 126.f, danger_,
+                {static_cast<unsigned char>(200 + 55 * danger_),
+                 static_cast<unsigned char>(120 - 100 * danger_), 40, 255}, "DANGER");
+
+        if (bankFlash_ > 0.f && bigFont_.valid())
+            bigFont_.draw(r, "BANKED!", zone_.x + 14.f, zone_.y - 36.f, {120, 255, 160, 255});
     }
 
     float arenaW_ = 0.f, arenaH_ = 0.f;
     Vec2 player_;
     Rect zone_{};
     std::vector<LootItem> loot_;
+    std::vector<Roamer> enemies_;
 
     int cash_ = 0;
     int carriedValue_ = 0;
     float carriedWeight_ = 0.f;
+    float health_ = cfg::PlayerMaxHealth;
+    float iframe_ = 0.f;
+    float danger_ = 0.f;
+    int nextThreshold_ = 0;
     float bankFlash_ = 0.f;
+    bool gameOver_ = false;
 
+    unsigned rng_ = 1u;
     bool autoplay_ = false;
     bool quit_ = false;
 
@@ -242,6 +400,7 @@ int main(int argc, char** argv) {
     cfg.height = 600;
 
     bool demo = false;
+    int frames = -1;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--screenshot" && i + 1 < argc) {
@@ -249,9 +408,12 @@ int main(int argc, char** argv) {
             cfg.screenshotPath = argv[++i];
         } else if (arg == "--demo") {
             demo = true;
+        } else if (arg == "--frames" && i + 1 < argc) {
+            frames = std::atoi(argv[++i]);
         }
     }
-    if (demo) cfg.warmupFrames = 240;  // ~4s of bot play before the snapshot
+    if (demo && frames < 0) frames = 240;
+    if (frames > 0) cfg.warmupFrames = frames;
 
     HaulGame game;
     game.setAutoplay(demo);
