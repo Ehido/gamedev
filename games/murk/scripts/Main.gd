@@ -1,7 +1,8 @@
 extends Node3D
-## Parkour practice scene: platforms over animated lava, in the murk. Fall in the
-## lava and you respawn at the start. Built in code so it's easy to iterate. Fog,
-## flashlight and difficulty all still apply; M cycles movement-feel modes.
+## Parkour practice scene over animated lava. Two maps (N to switch): MAP A is a
+## platform course, MAP B adds gapped staircases. Fall in the lava and you
+## respawn at the start. Fog, flashlight and difficulty all apply; M cycles
+## movement-feel modes.
 
 const PlayerScript := preload("res://scripts/Player.gd")
 const MovingFog := preload("res://shaders/moving_fog.gdshader")
@@ -9,10 +10,9 @@ const Lava := preload("res://shaders/lava.gdshader")
 const STAMINA_BAR_W := 180.0
 const KILL_Y := -1.5
 
-# Parkour course as [top-centre, size] pairs. Tops step up then down; gaps grow
-# so later jumps need a sprint. Easy to retune.
-const COURSE := [
-	[Vector3(0.0, 1.0, 16.0), Vector3(6.0, 1.0, 6.0)],     # start
+# MAP A: platform course as [top-centre, size] pairs.
+const COURSE_A := [
+	[Vector3(0.0, 1.0, 16.0), Vector3(6.0, 1.0, 6.0)],
 	[Vector3(0.0, 1.4, 12.5), Vector3(3.0, 1.0, 3.0)],
 	[Vector3(2.5, 1.7, 9.8), Vector3(2.2, 1.0, 2.2)],
 	[Vector3(-0.5, 2.1, 7.0), Vector3(2.2, 1.0, 2.2)],
@@ -23,7 +23,7 @@ const COURSE := [
 	[Vector3(2.0, 3.2, -8.0), Vector3(2.0, 1.0, 2.0)],
 	[Vector3(-1.5, 2.8, -10.5), Vector3(2.0, 1.0, 2.0)],
 	[Vector3(-4.5, 2.3, -13.0), Vector3(2.2, 1.0, 2.2)],
-	[Vector3(-8.0, 1.8, -16.0), Vector3(6.0, 1.0, 6.0)],   # goal
+	[Vector3(-8.0, 1.8, -16.0), Vector3(6.0, 1.0, 6.0)],
 ]
 
 var _env: Environment
@@ -32,18 +32,25 @@ var _hud: Label
 var _mode_label: Label
 var _player
 var _stamina_fill: ColorRect
+var _course_root: Node3D
+var _map: int = 0
 var _spawn_point := Vector3(0.0, 2.0, 16.0)
 
 func _ready() -> void:
 	_build_environment()
 	_build_lava()
-	_build_course()
 	_build_lights()
+	_rebuild_map()        # builds the course + sets the spawn point
 	_build_player()
 	_build_fog_volume()
 	_build_hud()
 	Difficulty.changed.connect(_apply_difficulty)
 	_apply_difficulty()
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_N:
+		_map = (_map + 1) % 2
+		_rebuild_map()
 
 func _process(_delta: float) -> void:
 	if _player and _stamina_fill:
@@ -51,11 +58,13 @@ func _process(_delta: float) -> void:
 		_stamina_fill.color = Color(1.0, 0.5, 0.2, 0.9) if _player.stamina_blocked() \
 			else Color(0.45, 0.78, 1.0, 0.9)
 	if _player and _mode_label:
-		_mode_label.text = "MOVE MODE: %s   (M to switch)" % _player.movement_mode_name()
-	# Respawn at the start if you fall into the lava.
+		var map_name := "A" if _map == 0 else "B"
+		_mode_label.text = "MOVE MODE: %s   |   MAP %s   (M / N)" % [_player.movement_mode_name(), map_name]
 	if _player and _player.global_position.y < KILL_Y:
 		_player.global_position = _spawn_point
 		_player.velocity = Vector3.ZERO
+
+# ---- world ----------------------------------------------------------------
 
 func _build_environment() -> void:
 	_env = Environment.new()
@@ -87,7 +96,6 @@ func _build_lava() -> void:
 	sm.shader = Lava
 	mi.material_override = sm
 	add_child(mi)
-	# Warm underglow so the platforms catch some lava light from below.
 	_add_lava_glow(Vector3(0.0, -0.5, 8.0))
 	_add_lava_glow(Vector3(2.0, -0.5, -3.0))
 	_add_lava_glow(Vector3(-5.0, -0.5, -14.0))
@@ -99,20 +107,6 @@ func _add_lava_glow(pos: Vector3) -> void:
 	glow.light_energy = 2.5
 	glow.omni_range = 16.0
 	add_child(glow)
-
-func _build_course() -> void:
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.22, 0.23, 0.27)
-	mat.roughness = 1.0
-	for entry in COURSE:
-		var top_centre: Vector3 = entry[0]
-		var size: Vector3 = entry[1]
-		var block := CSGBox3D.new()
-		block.size = size
-		block.position = top_centre - Vector3(0.0, size.y * 0.5, 0.0)
-		block.material = mat
-		block.use_collision = true
-		add_child(block)
 
 func _build_lights() -> void:
 	_add_lamp(Vector3(0.0, 5.0, 12.0), Color(0.7, 0.8, 1.0), 4.0, 18.0)
@@ -128,6 +122,63 @@ func _add_lamp(pos: Vector3, color: Color, energy: float, range_m: float) -> voi
 	lamp.set_meta("base_energy", energy)
 	lamp.add_to_group("lamp")
 	add_child(lamp)
+
+# ---- maps -----------------------------------------------------------------
+
+func _platform_material() -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.22, 0.23, 0.27)
+	mat.roughness = 1.0
+	return mat
+
+func _add_platform(parent: Node3D, top_centre: Vector3, size: Vector3, mat: Material) -> void:
+	var block := CSGBox3D.new()
+	block.size = size
+	block.position = top_centre - Vector3(0.0, size.y * 0.5, 0.0)
+	block.material = mat
+	block.use_collision = true
+	parent.add_child(block)
+
+# A flight of steps from base_top in `dir`, each step `rise` higher and `run`
+# further. Indices in `missing` are skipped, leaving gaps to jump.
+func _add_staircase(parent: Node3D, base_top: Vector3, dir: Vector3, count: int,
+		rise: float, run: float, missing: Array, mat: Material) -> void:
+	for i in range(1, count + 1):
+		if (i - 1) in missing:
+			continue
+		var top := base_top + dir * (run * float(i)) + Vector3(0.0, rise * float(i), 0.0)
+		_add_platform(parent, top, Vector3(2.2, 0.3, 1.4), mat)
+
+func _rebuild_map() -> void:
+	if _course_root:
+		_course_root.queue_free()
+	_course_root = Node3D.new()
+	add_child(_course_root)
+	var mat := _platform_material()
+	if _map == 0:
+		_spawn_point = Vector3(0.0, 2.0, 16.0)
+		for entry in COURSE_A:
+			_add_platform(_course_root, entry[0], entry[1], mat)
+	else:
+		_spawn_point = Vector3(0.0, 2.0, 18.0)
+		_build_map_b(mat)
+	if _player:
+		_player.global_position = _spawn_point
+		_player.velocity = Vector3.ZERO
+
+# MAP B: gapped staircases + harder jumps.
+func _build_map_b(mat: Material) -> void:
+	_add_platform(_course_root, Vector3(0.0, 1.0, 18.0), Vector3(6.0, 1.0, 6.0), mat)   # start
+	# Ascending stairs with two missing steps (gaps to jump over).
+	_add_staircase(_course_root, Vector3(0.0, 1.0, 15.0), Vector3(0.0, 0.0, -1.0), 9, 0.35, 1.2, [3, 6], mat)
+	# Floating jumps off the top of the stairs.
+	_add_platform(_course_root, Vector3(2.8, 4.2, 1.5), Vector3(2.2, 1.0, 2.2), mat)
+	_add_platform(_course_root, Vector3(-1.0, 4.6, -2.0), Vector3(2.0, 1.0, 2.0), mat)
+	# Descending stairs with a gap, leading down to the goal.
+	_add_staircase(_course_root, Vector3(-1.0, 4.6, -3.5), Vector3(0.0, 0.0, -1.0), 7, -0.4, 1.2, [2, 5], mat)
+	_add_platform(_course_root, Vector3(-1.0, 1.6, -14.0), Vector3(6.0, 1.0, 6.0), mat)  # goal
+
+# ---- player + hud ---------------------------------------------------------
 
 func _build_player() -> void:
 	var player := CharacterBody3D.new()
@@ -182,7 +233,7 @@ func _build_hud() -> void:
 
 	var help := Label.new()
 	help.position = Vector2(20.0, 50.0)
-	help.text = "WASD  -  Shift sprint  -  Ctrl crouch  -  Space jump  -  M move-mode  -  F light  -  TAB difficulty  -  fall in lava = respawn"
+	help.text = "WASD - Shift sprint - Ctrl crouch - Space jump - M mode - N map - F light - TAB difficulty - lava = respawn"
 	canvas.add_child(help)
 
 	_mode_label = Label.new()

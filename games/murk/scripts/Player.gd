@@ -31,6 +31,7 @@ const STAND_CAM_Y := 1.6
 const CROUCH_CAM_Y := 0.9
 const STAND_HEIGHT := 1.8
 const CROUCH_HEIGHT := 1.0
+const MAX_STEP_HEIGHT := 0.45  # walk up steps/stairs no taller than this
 
 # Switchable feel presets (M cycles them). WEIGHTY = recommended default.
 const MOVEMENT_MODES := [
@@ -184,18 +185,26 @@ func _physics_process(delta: float) -> void:
 	elif sprinting:
 		target_speed *= sprint_multiplier
 
-	# Accelerate horizontal velocity toward the target (momentum + friction on
-	# the ground, light steering in the air so jumps keep their speed).
+	# Ground: friction + acceleration toward target. Air: preserve momentum and
+	# only steer -- you never bleed speed in the air, so jumps keep their pace
+	# (FLOW's high air accel makes the steering quick and floaty).
 	var hvel := Vector3(velocity.x, 0.0, velocity.z)
 	var target_vel := wish_dir * target_speed
-	var accel := air_accel
 	if on_ground:
-		accel = ground_accel if moving else ground_friction
-	hvel = hvel.move_toward(target_vel, accel * delta)
+		var accel := ground_accel if moving else ground_friction
+		hvel = hvel.move_toward(target_vel, accel * delta)
+	elif moving:
+		var pre := hvel.length()
+		hvel += wish_dir * air_accel * delta
+		var limit := maxf(pre, target_speed)
+		if hvel.length() > limit:
+			hvel = hvel.normalized() * limit
 	velocity.x = hvel.x
 	velocity.z = hvel.z
 
 	move_and_slide()
+	if is_on_floor():
+		_try_step_up()
 
 	# Landing detection (for the camera dip).
 	var now_on_floor := is_on_floor()
@@ -210,6 +219,30 @@ func _apply_crouch_collision() -> void:
 		var h: float = lerpf(STAND_HEIGHT, CROUCH_HEIGHT, _crouch)
 		_capsule.height = h
 		_collision.position.y = h * 0.5
+
+# Walk up small steps/stairs that move_and_slide would otherwise wall us against.
+func _try_step_up() -> void:
+	var horiz := Vector3(velocity.x, 0.0, velocity.z)
+	if horiz.length() < 0.08:
+		return
+	# Only when we actually ran into a near-vertical wall this frame.
+	var into_wall := false
+	for i in range(get_slide_collision_count()):
+		var c := get_slide_collision(i)
+		if absf(c.get_normal().y) < 0.25 and horiz.dot(-c.get_normal()) > 0.0:
+			into_wall = true
+			break
+	if not into_wall:
+		return
+	# Ghost-move up, forward, then down onto the higher surface; undo if there's
+	# no floor up there (it was a real wall, not a step).
+	var saved := global_transform
+	var fwd := horiz.normalized() * 0.35
+	move_and_collide(Vector3(0.0, MAX_STEP_HEIGHT, 0.0))
+	move_and_collide(fwd)
+	var down := move_and_collide(Vector3(0.0, -MAX_STEP_HEIGHT, 0.0))
+	if down == null or down.get_normal().y < 0.7:
+		global_transform = saved
 
 func _update_camera(delta: float, hspeed: float, sprinting: bool,
 		just_landed: bool, impact: float, on_ground: bool) -> void:
