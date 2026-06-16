@@ -13,7 +13,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED sdl2)
 pkg_check_modules(SDL2IMG REQUIRED SDL2_image)
 
-add_executable(engine3d src/main.cpp src/swrender.cpp)
+add_executable(engine3d src/main.cpp src/swrender.cpp src/mesh.cpp)
 target_include_directories(engine3d PRIVATE src ${SDL2_INCLUDE_DIRS} ${SDL2IMG_INCLUDE_DIRS})
 target_link_directories(engine3d PRIVATE ${SDL2_LIBRARY_DIRS} ${SDL2IMG_LIBRARY_DIRS})
 target_link_libraries(engine3d PRIVATE ${SDL2_LIBRARIES} ${SDL2IMG_LIBRARIES})

@@ -1,72 +1,98 @@
-// engine3d -- a from-scratch software-rendered 3D engine (Milestone 0).
-// Builds a small scene of lit, fogged cubes and rasterises it to a PNG with our
-// own renderer -- no GPU, no Godot. This is the foundation; a GPU backend for
-// real-time speed comes later.
+// engine3d -- software-rendered 3D engine.
+// Renders a textured, lit, fogged scene with an orbiting camera. Single frame
+// by default, or an animated sequence with --frames N --outdir DIR.
 
+#include "mesh.h"
 #include "swrender.h"
 
 #include <SDL.h>
 #include <SDL_image.h>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 
-namespace {
-
-// Unit cube (-0.5..0.5), 12 triangles. Winding doesn't matter: the shader
-// orients each face's normal toward the camera.
-const Vec3 CUBE[36] = {
-    {-0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, 0.5f}, {0.5f, 0.5f, 0.5f},
-    {-0.5f, -0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f},
-    {0.5f, -0.5f, -0.5f}, {-0.5f, -0.5f, -0.5f}, {-0.5f, 0.5f, -0.5f},
-    {0.5f, -0.5f, -0.5f}, {-0.5f, 0.5f, -0.5f}, {0.5f, 0.5f, -0.5f},
-    {-0.5f, -0.5f, -0.5f}, {-0.5f, -0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f},
-    {-0.5f, -0.5f, -0.5f}, {-0.5f, 0.5f, 0.5f}, {-0.5f, 0.5f, -0.5f},
-    {0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, -0.5f},
-    {0.5f, -0.5f, 0.5f}, {0.5f, 0.5f, -0.5f}, {0.5f, 0.5f, 0.5f},
-    {-0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, -0.5f},
-    {-0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, -0.5f}, {-0.5f, 0.5f, -0.5f},
-    {-0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, 0.5f},
-    {-0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, 0.5f}, {-0.5f, -0.5f, 0.5f},
-};
-
-void renderBox(Framebuffer& fb, const Mat4& vp, Vec3 pos, Vec3 size, float ry,
-               Vec3 color, const Light& light, const Vec3& eye, const FogParams& fog) {
-    Mat4 model = translate(pos) * rotateY(ry) * scale(size);
-    for (int i = 0; i < 36; i += 3)
-        drawTriangle(fb, vp, model, CUBE[i], CUBE[i + 1], CUBE[i + 2], color, light, eye, fog);
+static void renderMesh(Framebuffer& fb, const Mat4& vp, const Mat4& model, const Mesh& mesh,
+                       const Texture* tex, Vec3 tint, const Light& light, const Vec3& eye,
+                       const FogParams& fog) {
+    for (size_t i = 0; i + 2 < mesh.verts.size(); i += 3)
+        drawTriangle(fb, vp, model, mesh.verts[i], mesh.verts[i + 1], mesh.verts[i + 2], tex, tint,
+                     light, eye, fog);
 }
-
-} // namespace
 
 int main(int argc, char** argv) {
     setenv("SDL_VIDEODRIVER", "dummy", 1);
     SDL_Init(SDL_INIT_VIDEO);
     IMG_Init(IMG_INIT_PNG);
 
+    int frames = 0;
+    std::string outdir = ".";
+    std::string out = "frame.png";
+    std::string assets = "assets";
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
+        else if (a == "--outdir" && i + 1 < argc) outdir = argv[++i];
+        else if (a == "--assets" && i + 1 < argc) assets = argv[++i];
+        else out = a;
+    }
+
     const int W = 960, H = 600;
-    Framebuffer fb(W, H);
     Vec3 fogColor{0.12f, 0.13f, 0.17f};
-    fb.clear(fogColor);
+    Light light{Vec3{-0.5f, -1.f, -0.4f}.normalized(), 0.30f, 0.85f};
+    FogParams fog{fogColor, 10.f, 34.f};
+
+    // Meshes + textures (built once).
+    Mesh ground = Mesh::plane(60.f, 30.f);
+    Mesh sphere = Mesh::uvSphere(24, 36);
+    Mesh box = Mesh::cube();
+    Mesh octa;
+    bool haveObj = octa.loadObj(assets + "/octahedron.obj");
+
+    Texture texGround = Texture::checker(256, {0.10f, 0.12f, 0.13f}, {0.16f, 0.18f, 0.18f}, 24);
+    Texture texSphere = Texture::checker(256, {0.85f, 0.32f, 0.18f}, {0.95f, 0.62f, 0.22f}, 14);
+    Texture texBox = Texture::checker(128, {0.28f, 0.45f, 0.65f}, {0.18f, 0.28f, 0.45f}, 4);
+    Texture texOcta = Texture::checker(128, {0.45f, 0.85f, 0.5f}, {0.2f, 0.5f, 0.25f}, 3);
 
     Mat4 proj = perspective(60.f * 3.14159265f / 180.f, float(W) / float(H), 0.1f, 200.f);
-    Vec3 eye{0.f, 5.f, 14.f};
-    Mat4 view = lookAt(eye, Vec3{0.f, 1.5f, -2.f}, Vec3{0.f, 1.f, 0.f});
-    Mat4 vp = proj * view;
+    Vec3 center{0.f, 1.5f, 0.f};
+    const float radius = 9.5f, camH = 5.f;
 
-    Light light{Vec3{-0.5f, -1.f, -0.4f}.normalized(), 0.28f, 0.85f};
-    FogParams fog{fogColor, 8.f, 30.f};
+    int total = frames > 0 ? frames : 1;
+    for (int f = 0; f < total; ++f) {
+        float a = (frames > 0) ? (float(f) / frames) * 2.f * 3.14159265f : 0.7f;
+        Vec3 eye{center.x + std::sin(a) * radius, camH, center.z + std::cos(a) * radius};
+        Mat4 vp = proj * lookAt(eye, center, Vec3{0.f, 1.f, 0.f});
 
-    renderBox(fb, vp, {0.f, -0.5f, 0.f}, {60.f, 1.f, 60.f}, 0.f, {0.14f, 0.16f, 0.15f}, light, eye, fog);
-    renderBox(fb, vp, {0.f, 1.f, 8.f}, {2.f, 2.f, 2.f}, 0.3f, {0.55f, 0.45f, 0.35f}, light, eye, fog);
-    renderBox(fb, vp, {3.f, 1.5f, 4.f}, {2.f, 3.f, 2.f}, 0.f, {0.40f, 0.45f, 0.55f}, light, eye, fog);
-    renderBox(fb, vp, {-3.f, 1.f, 3.f}, {2.f, 2.f, 2.f}, 0.6f, {0.50f, 0.40f, 0.45f}, light, eye, fog);
-    renderBox(fb, vp, {1.f, 2.f, 0.f}, {2.f, 4.f, 2.f}, 0.2f, {0.45f, 0.50f, 0.45f}, light, eye, fog);
-    renderBox(fb, vp, {-2.f, 1.f, -4.f}, {3.f, 2.f, 3.f}, 0.f, {0.50f, 0.48f, 0.40f}, light, eye, fog);
-    renderBox(fb, vp, {4.f, 1.f, -3.f}, {2.f, 2.f, 2.f}, 0.4f, {0.42f, 0.46f, 0.52f}, light, eye, fog);
+        Framebuffer fb(W, H);
+        fb.clear(fogColor);
 
-    const char* out = (argc > 1) ? argv[1] : "frame.png";
-    bool ok = fb.savePNG(out);
+        renderMesh(fb, vp, translate({0.f, 0.f, 0.f}), ground, &texGround, {1, 1, 1}, light, eye, fog);
+        renderMesh(fb, vp, translate({0.f, 1.3f, 0.f}) * scale({2.6f, 2.6f, 2.6f}), sphere,
+                   &texSphere, {1, 1, 1}, light, eye, fog);
+        renderMesh(fb, vp, translate({-3.5f, 1.f, 2.5f}) * rotateY(0.4f) * scale({2.f, 2.f, 2.f}),
+                   box, &texBox, {1, 1, 1}, light, eye, fog);
+        renderMesh(fb, vp, translate({3.5f, 1.5f, -1.f}) * rotateY(-0.3f) * scale({2.f, 3.f, 2.f}),
+                   box, &texBox, {1, 1, 1}, light, eye, fog);
+        if (haveObj)
+            renderMesh(fb, vp, translate({0.f, 3.6f, -3.f}) * rotateY(a * 2.f) * scale({1.6f, 1.6f, 1.6f}),
+                       octa, &texOcta, {1, 1, 1}, light, eye, fog);
+
+        char path[512];
+        if (frames > 0)
+            std::snprintf(path, sizeof(path), "%s/frame_%03d.png", outdir.c_str(), f);
+        else
+            std::snprintf(path, sizeof(path), "%s", out.c_str());
+        if (!fb.savePNG(path)) {
+            std::fprintf(stderr, "savePNG failed: %s\n", path);
+            IMG_Quit();
+            SDL_Quit();
+            return 1;
+        }
+    }
 
     IMG_Quit();
     SDL_Quit();
-    return ok ? 0 : 1;
+    return 0;
 }
