@@ -6,9 +6,13 @@ extends Node3D
 const PlayerScript := preload("res://scripts/Player.gd")
 const MovingFog := preload("res://shaders/moving_fog.gdshader")
 
+const STAMINA_BAR_W := 180.0
+
 var _env: Environment
 var _fog_material: ShaderMaterial
 var _hud: Label
+var _player: CharacterBody3D
+var _stamina_fill: ColorRect
 
 func _ready() -> void:
 	_build_environment()
@@ -32,6 +36,9 @@ func _build_environment() -> void:
 	_env.volumetric_fog_density = 0.035
 	_env.volumetric_fog_albedo = Color(0.62, 0.64, 0.72)
 	_env.volumetric_fog_length = 64.0
+	# Smooth out froxel "slice" banding in the light shafts.
+	_env.volumetric_fog_temporal_reprojection_enabled = true
+	_env.volumetric_fog_temporal_reprojection_amount = 0.95
 	# Let ambient + sky light actually illuminate the fog so it reads as fog
 	# instead of a black void.
 	_env.volumetric_fog_ambient_inject = 1.5
@@ -117,6 +124,7 @@ func _build_player() -> void:
 	flashlight.add_to_group("flashlight")
 	cam.add_child(flashlight)
 
+	_player = player
 	add_child(player)
 
 func _build_fog_volume() -> void:
@@ -138,8 +146,27 @@ func _build_hud() -> void:
 	canvas.add_child(_hud)
 	var help := Label.new()
 	help.position = Vector2(20, 50)
-	help.text = "WASD move   -   Mouse look   -   F flashlight   -   TAB change difficulty   -   Esc/click toggle cursor"
+	help.text = "WASD move   -   Shift sprint   -   Mouse look   -   F flashlight   -   TAB difficulty   -   Esc/click cursor"
 	canvas.add_child(help)
+
+	var stam_label := Label.new()
+	stam_label.position = Vector2(20, 78)
+	stam_label.text = "STAMINA"
+	canvas.add_child(stam_label)
+	var stam_bg := ColorRect.new()
+	stam_bg.position = Vector2(110, 80)
+	stam_bg.size = Vector2(STAMINA_BAR_W, 14)
+	stam_bg.color = Color(0.10, 0.10, 0.13, 0.8)
+	canvas.add_child(stam_bg)
+	_stamina_fill = ColorRect.new()
+	_stamina_fill.position = Vector2(110, 80)
+	_stamina_fill.size = Vector2(STAMINA_BAR_W, 14)
+	_stamina_fill.color = Color(0.45, 0.78, 1.0, 0.9)
+	canvas.add_child(_stamina_fill)
+
+func _process(_delta: float) -> void:
+	if _player and _stamina_fill:
+		_stamina_fill.size.x = STAMINA_BAR_W * _player.stamina_ratio()
 
 func _apply_difficulty() -> void:
 	var d := Difficulty.current()

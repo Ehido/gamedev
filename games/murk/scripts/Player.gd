@@ -7,8 +7,18 @@ extends CharacterBody3D
 @export var mouse_sensitivity: float = 0.0025
 @export var gravity: float = 16.0
 
+# Sprint: hold Shift for a burst of speed, limited by stamina. Placeholder
+# numbers -- easy to retune later.
+@export var sprint_multiplier: float = 1.35
+@export var max_stamina: float = 3.0       # seconds of sprint available
+@export var stamina_recharge: float = 1.0  # refills to full in ~3s of not sprinting
+
+var stamina: float = 3.0
 var _camera: Camera3D
 var _pitch: float = 0.0
+
+func stamina_ratio() -> float:
+	return stamina / max_stamina if max_stamina > 0.0 else 0.0
 
 func _ready() -> void:
 	_camera = get_node_or_null("Camera")
@@ -62,9 +72,17 @@ func _physics_process(delta: float) -> void:
 	if Input.is_physical_key_pressed(KEY_D):
 		input_dir.x += 1.0
 
+	var moving := input_dir != Vector3.ZERO
+	var sprinting := moving and Input.is_physical_key_pressed(KEY_SHIFT) and stamina > 0.0
+	if sprinting:
+		stamina = max(stamina - delta, 0.0)
+	else:
+		stamina = min(stamina + stamina_recharge * delta, max_stamina)
+
+	var current_speed := speed * (sprint_multiplier if sprinting else 1.0)
 	var dir := transform.basis * input_dir.normalized()
 	dir.y = 0.0
 	dir = dir.normalized()
-	velocity.x = dir.x * speed
-	velocity.z = dir.z * speed
+	velocity.x = dir.x * current_speed
+	velocity.z = dir.z * current_speed
 	move_and_slide()
