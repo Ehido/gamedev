@@ -138,7 +138,7 @@ func _build_hud() -> void:
 	canvas.add_child(_hud)
 	var help := Label.new()
 	help.position = Vector2(20, 50)
-	help.text = "WASD move   -   Mouse look   -   Click to grab cursor   -   TAB change difficulty   -   Esc toggle cursor"
+	help.text = "WASD move   -   Mouse look   -   F flashlight   -   TAB change difficulty   -   Esc/click toggle cursor"
 	canvas.add_child(help)
 
 func _apply_difficulty() -> void:

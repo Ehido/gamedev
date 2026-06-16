@@ -31,6 +31,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			_toggle_mouse()
 		elif event.keycode == KEY_TAB:
 			Difficulty.cycle()
+		elif event.keycode == KEY_F:
+			_toggle_flashlight()
 
 func _toggle_mouse() -> void:
 	# Esc frees the cursor; Esc again (or a click) grabs it back so you can keep looking.
@@ -38,6 +40,10 @@ func _toggle_mouse() -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	else:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+func _toggle_flashlight() -> void:
+	for flashlight in get_tree().get_nodes_in_group("flashlight"):
+		flashlight.visible = not flashlight.visible
 
 func _physics_process(delta: float) -> void:
 	if is_on_floor():

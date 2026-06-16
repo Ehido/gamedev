@@ -17,39 +17,48 @@ var level: int = Level.NORMAL
 const PRESETS := {
 	Level.EASY: {
 		"name": "EASY",
-		"fog": 0.015, "fog_color": Color(0.55, 0.60, 0.66),
-		"light_range": 22.0, "light_energy": 6.0, "ambient": 0.22, "lamp": 1.00,
+		"fog": 0.025, "fog_color": Color(0.52, 0.57, 0.63),
+		"light_range": 18.0, "light_energy": 5.0, "ambient": 0.16, "lamp": 0.85,
 	},
 	Level.NORMAL: {
 		"name": "NORMAL",
-		"fog": 0.040, "fog_color": Color(0.46, 0.49, 0.56),
-		"light_range": 15.0, "light_energy": 5.2, "ambient": 0.13, "lamp": 0.80,
+		"fog": 0.050, "fog_color": Color(0.45, 0.48, 0.55),
+		"light_range": 14.0, "light_energy": 4.0, "ambient": 0.105, "lamp": 0.68,
 	},
 	Level.HARD: {
 		"name": "HARD",
-		"fog": 0.075, "fog_color": Color(0.40, 0.42, 0.50),
-		"light_range": 12.0, "light_energy": 4.8, "ambient": 0.080, "lamp": 0.60,
+		"fog": 0.085, "fog_color": Color(0.40, 0.42, 0.50),
+		"light_range": 11.5, "light_energy": 3.2, "ambient": 0.070, "lamp": 0.52,
 	},
 	Level.NIGHTMARE: {
 		"name": "NIGHTMARE",
-		"fog": 0.115, "fog_color": Color(0.35, 0.37, 0.46),
-		"light_range": 10.0, "light_energy": 4.5, "ambient": 0.050, "lamp": 0.45,
+		"fog": 0.125, "fog_color": Color(0.35, 0.37, 0.46),
+		"light_range": 10.0, "light_energy": 2.7, "ambient": 0.045, "lamp": 0.40,
 	},
 	Level.DREAD: {
 		"name": "DREAD",
-		"fog": 0.160, "fog_color": Color(0.31, 0.33, 0.42),
-		"light_range": 8.5, "light_energy": 4.2, "ambient": 0.035, "lamp": 0.33,
+		"fog": 0.170, "fog_color": Color(0.31, 0.33, 0.42),
+		"light_range": 8.5, "light_energy": 2.3, "ambient": 0.032, "lamp": 0.30,
 	},
 	Level.ABYSS: {
 		"name": "ABYSS",
-		"fog": 0.210, "fog_color": Color(0.28, 0.30, 0.39),
-		"light_range": 7.5, "light_energy": 4.0, "ambient": 0.025, "lamp": 0.24,
+		"fog": 0.220, "fog_color": Color(0.28, 0.30, 0.39),
+		"light_range": 7.5, "light_energy": 2.0, "ambient": 0.022, "lamp": 0.22,
 	},
 	Level.PITCH: {
 		"name": "PITCH",
-		"fog": 0.260, "fog_color": Color(0.25, 0.27, 0.36),
-		"light_range": 6.5, "light_energy": 3.8, "ambient": 0.016, "lamp": 0.15,
+		"fog": 0.270, "fog_color": Color(0.25, 0.27, 0.36),
+		"light_range": 6.5, "light_energy": 1.8, "ambient": 0.014, "lamp": 0.14,
 	},
+}
+
+# The "see everything" state, reserved for DEATH: when you die the fog lifts and
+# the world goes bright/clear. Not part of the playable cycle -- the death/enemy
+# system will apply this once it exists.
+const DEATH_VIEW := {
+	"name": "DEAD",
+	"fog": 0.004, "fog_color": Color(0.60, 0.65, 0.72),
+	"light_range": 28.0, "light_energy": 7.5, "ambient": 0.55, "lamp": 1.30,
 }
 
 func current() -> Dictionary:
