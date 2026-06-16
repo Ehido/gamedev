@@ -9,45 +9,46 @@ enum Level { EASY, NORMAL, HARD, NIGHTMARE, DREAD, ABYSS, PITCH }
 
 var level: int = Level.NORMAL
 
-# The darker tiers thicken the fog and drop the ambient light, but the
-# flashlight stays strong on purpose: darkness should feel oppressive, never
-# "I literally can't see, this is just annoying". PITCH is the floor of
-# viability, not a black screen.
+# Darker across the board, and the hard end ramps aggressively on EVERYTHING:
+# fog thickens fast, ambient + room lamps + flashlight all drop. The flashlight
+# is still the one thing you can rely on, but at the bottom you're hugging it.
+# Each preset: fog density, fog tint, flashlight reach (m) + energy, global
+# ambient, and "lamp" = a multiplier on the room work-lamps.
 const PRESETS := {
 	Level.EASY: {
 		"name": "EASY",
-		"fog": 0.012, "fog_color": Color(0.56, 0.61, 0.67),
-		"light_range": 24.0, "light_energy": 6.0, "ambient": 0.32,
+		"fog": 0.015, "fog_color": Color(0.55, 0.60, 0.66),
+		"light_range": 22.0, "light_energy": 6.0, "ambient": 0.22, "lamp": 1.00,
 	},
 	Level.NORMAL: {
 		"name": "NORMAL",
-		"fog": 0.030, "fog_color": Color(0.48, 0.51, 0.58),
-		"light_range": 17.0, "light_energy": 5.5, "ambient": 0.22,
+		"fog": 0.040, "fog_color": Color(0.46, 0.49, 0.56),
+		"light_range": 15.0, "light_energy": 5.2, "ambient": 0.13, "lamp": 0.80,
 	},
 	Level.HARD: {
 		"name": "HARD",
-		"fog": 0.050, "fog_color": Color(0.42, 0.44, 0.52),
-		"light_range": 13.0, "light_energy": 5.0, "ambient": 0.15,
+		"fog": 0.075, "fog_color": Color(0.40, 0.42, 0.50),
+		"light_range": 12.0, "light_energy": 4.8, "ambient": 0.080, "lamp": 0.60,
 	},
 	Level.NIGHTMARE: {
 		"name": "NIGHTMARE",
-		"fog": 0.075, "fog_color": Color(0.37, 0.39, 0.48),
-		"light_range": 10.0, "light_energy": 4.8, "ambient": 0.10,
+		"fog": 0.115, "fog_color": Color(0.35, 0.37, 0.46),
+		"light_range": 10.0, "light_energy": 4.5, "ambient": 0.050, "lamp": 0.45,
 	},
 	Level.DREAD: {
 		"name": "DREAD",
-		"fog": 0.100, "fog_color": Color(0.33, 0.35, 0.44),
-		"light_range": 9.0, "light_energy": 4.8, "ambient": 0.075,
+		"fog": 0.160, "fog_color": Color(0.31, 0.33, 0.42),
+		"light_range": 8.5, "light_energy": 4.2, "ambient": 0.035, "lamp": 0.33,
 	},
 	Level.ABYSS: {
 		"name": "ABYSS",
-		"fog": 0.130, "fog_color": Color(0.30, 0.32, 0.41),
-		"light_range": 8.0, "light_energy": 4.8, "ambient": 0.055,
+		"fog": 0.210, "fog_color": Color(0.28, 0.30, 0.39),
+		"light_range": 7.5, "light_energy": 4.0, "ambient": 0.025, "lamp": 0.24,
 	},
 	Level.PITCH: {
 		"name": "PITCH",
-		"fog": 0.160, "fog_color": Color(0.27, 0.29, 0.38),
-		"light_range": 7.0, "light_energy": 4.8, "ambient": 0.040,
+		"fog": 0.260, "fog_color": Color(0.25, 0.27, 0.36),
+		"light_range": 6.5, "light_energy": 3.8, "ambient": 0.016, "lamp": 0.15,
 	},
 }
 

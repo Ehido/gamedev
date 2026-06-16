@@ -54,6 +54,8 @@ func _add_lamp(pos: Vector3, color: Color, energy: float, range_m: float) -> voi
 	lamp.light_color = color
 	lamp.light_energy = energy
 	lamp.omni_range = range_m
+	lamp.set_meta("base_energy", energy)  # so difficulty can dim them
+	lamp.add_to_group("lamp")
 	add_child(lamp)
 
 func _build_room() -> void:
@@ -146,13 +148,17 @@ func _apply_difficulty() -> void:
 	_env.ambient_light_energy = d["ambient"]
 
 	if _fog_material:
-		_fog_material.set_shader_parameter("base_density", float(d["fog"]) * 0.8)
+		_fog_material.set_shader_parameter("base_density", float(d["fog"]) * 0.6)
 		var c: Color = d["fog_color"]
 		_fog_material.set_shader_parameter("fog_albedo", Vector3(c.r, c.g, c.b))
 
 	for light in get_tree().get_nodes_in_group("flashlight"):
 		light.spot_range = d["light_range"]
 		light.light_energy = d["light_energy"]
+
+	var lamp_scale: float = d.get("lamp", 1.0)
+	for lamp in get_tree().get_nodes_in_group("lamp"):
+		lamp.light_energy = float(lamp.get_meta("base_energy")) * lamp_scale
 
 	if _hud:
 		_hud.text = "DIFFICULTY: %s    (fog %.3f  -  light reach %.0fm)" % [
