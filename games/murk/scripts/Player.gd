@@ -22,11 +22,22 @@ func _unhandled_input(event: InputEvent) -> void:
 		_pitch = clamp(_pitch - event.relative.y * mouse_sensitivity, -1.4, 1.4)
 		if _camera:
 			_camera.rotation.x = _pitch
+	elif event is InputEventMouseButton and event.pressed:
+		# Click back into the window to re-capture the mouse and look around again.
+		if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	elif event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_ESCAPE:
-			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+			_toggle_mouse()
 		elif event.keycode == KEY_TAB:
 			Difficulty.cycle()
+
+func _toggle_mouse() -> void:
+	# Esc frees the cursor; Esc again (or a click) grabs it back so you can keep looking.
+	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	else:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func _physics_process(delta: float) -> void:
 	if is_on_floor():
