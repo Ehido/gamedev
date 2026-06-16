@@ -6,7 +6,7 @@ extends CharacterBody3D
 ## sprint FOV, landing dip). Numbers are placeholders -- easy to retune.
 
 @export var speed: float = 4.5
-@export var sprint_multiplier: float = 1.35
+@export var sprint_multiplier: float = 1.7
 @export var crouch_speed_multiplier: float = 0.5
 @export var mouse_sensitivity: float = 0.0025
 
@@ -32,6 +32,14 @@ const CROUCH_CAM_Y := 0.9
 const STAND_HEIGHT := 1.8
 const CROUCH_HEIGHT := 1.0
 
+# Switchable feel presets (M cycles them). WEIGHTY = recommended default.
+const MOVEMENT_MODES := [
+	{"name": "WEIGHTY", "accel": 35.0, "friction": 30.0, "air": 9.0,  "jump": 7.0, "grav": 18.0, "sprint": 1.7},
+	{"name": "TIGHT",   "accel": 62.0, "friction": 55.0, "air": 16.0, "jump": 6.6, "grav": 22.0, "sprint": 1.5},
+	{"name": "FLOW",    "accel": 28.0, "friction": 14.0, "air": 22.0, "jump": 7.6, "grav": 16.0, "sprint": 1.9},
+]
+var _mode: int = 0
+
 var stamina: float = 3.0
 var _recharge_timer: float = 0.0
 var _crouch: float = 0.0
@@ -53,6 +61,22 @@ func stamina_ratio() -> float:
 func stamina_blocked() -> bool:
 	return _recharge_timer > 0.0 and stamina < max_stamina
 
+func movement_mode_name() -> String:
+	return str(MOVEMENT_MODES[_mode]["name"])
+
+func cycle_movement_mode() -> void:
+	_mode = (_mode + 1) % MOVEMENT_MODES.size()
+	_apply_movement_mode()
+
+func _apply_movement_mode() -> void:
+	var m: Dictionary = MOVEMENT_MODES[_mode]
+	ground_accel = float(m["accel"])
+	ground_friction = float(m["friction"])
+	air_accel = float(m["air"])
+	jump_velocity = float(m["jump"])
+	gravity = float(m["grav"])
+	sprint_multiplier = float(m["sprint"])
+
 func _ready() -> void:
 	_camera = get_node_or_null("Camera")
 	_collision = get_node_or_null("Collision")
@@ -60,6 +84,7 @@ func _ready() -> void:
 		_capsule = _collision.shape as CapsuleShape3D
 	if _camera:
 		_camera.fov = base_fov
+	_apply_movement_mode()
 	if DisplayServer.get_name() != "headless":
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
@@ -77,6 +102,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_ESCAPE: _toggle_mouse()
 			KEY_TAB: Difficulty.cycle()
 			KEY_F: _toggle_flashlight()
+			KEY_M: cycle_movement_mode()
 			KEY_SPACE: _jump_queued = true
 
 func _toggle_mouse() -> void:
@@ -197,8 +223,8 @@ func _update_camera(delta: float, hspeed: float, sprinting: bool,
 	# Head-bob, scaled by how fast you're actually moving on the ground.
 	var move_amt: float = clampf(hspeed / speed, 0.0, 1.4) if on_ground else 0.0
 	_bob_time += delta * (6.0 + hspeed * 1.5)
-	var bob_y := sin(_bob_time) * 0.035 * move_amt
-	var bob_x := cos(_bob_time * 0.5) * 0.022 * move_amt
+	var bob_y := sin(_bob_time) * 0.030 * move_amt
+	var bob_x := cos(_bob_time * 0.5) * 0.019 * move_amt
 
 	# Landing dip: drop the camera on impact, then ease it back.
 	if just_landed:
