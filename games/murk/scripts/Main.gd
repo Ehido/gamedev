@@ -43,6 +43,7 @@ func _ready() -> void:
 	_rebuild_map()        # builds the course + sets the spawn point
 	_build_player()
 	_build_fog_volume()
+	_build_post()
 	_build_hud()
 	Difficulty.changed.connect(_apply_difficulty)
 	_apply_difficulty()
@@ -82,6 +83,22 @@ func _build_environment() -> void:
 	_env.volumetric_fog_temporal_reprojection_amount = 0.95
 	_env.volumetric_fog_ambient_inject = 1.5
 	_env.volumetric_fog_gi_inject = 0.0
+	# --- Beauty pass: bloom on bright emitters, dynamic GI, slight colour grade.
+	_env.glow_enabled = true
+	_env.glow_intensity = 0.9
+	_env.glow_strength = 1.0
+	_env.glow_bloom = 0.15
+	_env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SCREEN
+	_env.glow_hdr_threshold = 0.95
+	_env.set("glow_levels/2", 1.0)
+	_env.set("glow_levels/3", 1.0)
+	_env.set("glow_levels/4", 1.0)
+	_env.set("glow_levels/5", 1.0)
+	_env.sdfgi_enabled = true
+	_env.adjustment_enabled = true
+	_env.adjustment_brightness = 1.0
+	_env.adjustment_contrast = 1.08
+	_env.adjustment_saturation = 1.06
 	var world_env := WorldEnvironment.new()
 	world_env.environment = _env
 	add_child(world_env)
@@ -223,8 +240,21 @@ func _build_fog_volume() -> void:
 	fog.material = _fog_material
 	add_child(fog)
 
+func _build_post() -> void:
+	var canvas := CanvasLayer.new()
+	canvas.layer = 5  # under the HUD (layer 10), over the 3D view
+	add_child(canvas)
+	var rect := ColorRect.new()
+	rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sm := ShaderMaterial.new()
+	sm.shader = preload("res://shaders/post.gdshader")
+	rect.material = sm
+	canvas.add_child(rect)
+
 func _build_hud() -> void:
 	var canvas := CanvasLayer.new()
+	canvas.layer = 10
 	add_child(canvas)
 	_hud = Label.new()
 	_hud.position = Vector2(20.0, 18.0)
