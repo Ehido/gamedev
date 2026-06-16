@@ -13,6 +13,7 @@ var _hud: Label
 func _ready() -> void:
 	_build_environment()
 	_build_room()
+	_build_lights()
 	_build_player()
 	_build_fog_volume()
 	_build_hud()
@@ -22,19 +23,38 @@ func _ready() -> void:
 func _build_environment() -> void:
 	_env = Environment.new()
 	_env.background_mode = Environment.BG_COLOR
-	_env.background_color = Color(0.02, 0.02, 0.035)
+	_env.background_color = Color(0.04, 0.05, 0.07)
 	_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	_env.ambient_light_color = Color(0.5, 0.55, 0.7)
-	_env.ambient_light_energy = 0.03
+	_env.ambient_light_color = Color(0.45, 0.50, 0.62)
+	_env.ambient_light_energy = 0.20
 	_env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	_env.volumetric_fog_enabled = true
 	_env.volumetric_fog_density = 0.035
-	_env.volumetric_fog_albedo = Color(0.5, 0.52, 0.6)
+	_env.volumetric_fog_albedo = Color(0.62, 0.64, 0.72)
 	_env.volumetric_fog_length = 64.0
+	# Let ambient + sky light actually illuminate the fog so it reads as fog
+	# instead of a black void.
+	_env.volumetric_fog_ambient_inject = 1.5
 	_env.volumetric_fog_gi_inject = 0.0
 	var world_env := WorldEnvironment.new()
 	world_env.environment = _env
 	add_child(world_env)
+
+func _build_lights() -> void:
+	# Dim, colored work-lamps scattered around: they give the space shape and,
+	# crucially, give the volumetric fog something to catch so you can see it.
+	_add_lamp(Vector3(-11, 3.0, -8), Color(1.0, 0.72, 0.42), 6.0, 16.0)
+	_add_lamp(Vector3(12, 3.0, 7), Color(0.5, 0.72, 1.0), 5.0, 16.0)
+	_add_lamp(Vector3(2, 3.2, -16), Color(1.0, 0.82, 0.55), 5.0, 15.0)
+	_add_lamp(Vector3(-6, 3.0, 12), Color(0.7, 0.85, 1.0), 4.0, 14.0)
+
+func _add_lamp(pos: Vector3, color: Color, energy: float, range_m: float) -> void:
+	var lamp := OmniLight3D.new()
+	lamp.position = pos
+	lamp.light_color = color
+	lamp.light_energy = energy
+	lamp.omni_range = range_m
+	add_child(lamp)
 
 func _build_room() -> void:
 	var wall_mat := StandardMaterial3D.new()
