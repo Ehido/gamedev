@@ -17,3 +17,16 @@ add_executable(engine3d src/main.cpp src/swrender.cpp src/mesh.cpp)
 target_include_directories(engine3d PRIVATE src ${SDL2_INCLUDE_DIRS} ${SDL2IMG_INCLUDE_DIRS})
 target_link_directories(engine3d PRIVATE ${SDL2_LIBRARY_DIRS} ${SDL2IMG_LIBRARY_DIRS})
 target_link_libraries(engine3d PRIVATE ${SDL2_LIBRARIES} ${SDL2IMG_LIBRARIES})
+
+# GPU backend (OpenGL ES 3.0 via EGL). Optional: only built if EGL + GLES found.
+pkg_check_modules(EGL egl)
+pkg_check_modules(GLES glesv2)
+if(EGL_FOUND AND GLES_FOUND)
+  add_executable(engine3d_gl src/gl_main.cpp src/mesh.cpp)
+  target_include_directories(engine3d_gl PRIVATE src
+    ${SDL2_INCLUDE_DIRS} ${SDL2IMG_INCLUDE_DIRS} ${EGL_INCLUDE_DIRS} ${GLES_INCLUDE_DIRS})
+  target_link_directories(engine3d_gl PRIVATE
+    ${SDL2_LIBRARY_DIRS} ${SDL2IMG_LIBRARY_DIRS} ${EGL_LIBRARY_DIRS} ${GLES_LIBRARY_DIRS})
+  target_link_libraries(engine3d_gl PRIVATE
+    ${SDL2_LIBRARIES} ${SDL2IMG_LIBRARIES} ${EGL_LIBRARIES} ${GLES_LIBRARIES})
+endif()
