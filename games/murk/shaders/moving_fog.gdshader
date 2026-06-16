@@ -38,6 +38,7 @@ void fog() {
 	p += vec3(TIME * 0.08, TIME * 0.02, TIME * 0.05);
 	float n = vnoise(p) + 0.5 * vnoise(p * 2.0 + 3.0);
 	n /= 1.5;
-	DENSITY = base_density * smoothstep(0.35, 0.9, n);
+	// Gentle ramp (no hard edges) so the density doesn't band.
+	DENSITY = base_density * smoothstep(0.15, 1.0, n);
 	ALBEDO = fog_albedo;
 }

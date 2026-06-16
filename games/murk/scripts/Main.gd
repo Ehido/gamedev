@@ -11,7 +11,7 @@ const STAMINA_BAR_W := 180.0
 var _env: Environment
 var _fog_material: ShaderMaterial
 var _hud: Label
-var _player: CharacterBody3D
+var _player  # the Player CharacterBody3D (untyped so its script methods resolve)
 var _stamina_fill: ColorRect
 
 func _ready() -> void:
@@ -76,16 +76,37 @@ func _build_room() -> void:
 	_add_box(Vector3(1, 8, s), Vector3(-s * 0.5, 4, 0), wall_mat)    # wall -X
 	_add_box(Vector3(1, 8, s), Vector3(s * 0.5, 4, 0), wall_mat)     # wall +X
 
-	var crate_mat := StandardMaterial3D.new()
-	crate_mat.albedo_color = Color(0.30, 0.25, 0.18)
-	crate_mat.roughness = 1.0
+	# Scattered salvage: four kinds of object (crate / pillar / slab / big block)
+	# at varied sizes, positions and rotations. Randomized each launch so no two
+	# runs look the same.
+	var palette := [
+		Color(0.30, 0.25, 0.18), Color(0.22, 0.24, 0.28),
+		Color(0.28, 0.20, 0.20), Color(0.20, 0.26, 0.24),
+	]
 	var rng := RandomNumberGenerator.new()
-	rng.seed = 20260616
-	for i in 26:
-		var c := rng.randf_range(0.8, 1.9)
+	rng.randomize()
+	var count := rng.randi_range(30, 42)
+	for i in count:
+		var box_size: Vector3
+		match rng.randi() % 4:
+			0: box_size = Vector3(rng.randf_range(0.8, 1.8), rng.randf_range(0.8, 1.8), rng.randf_range(0.8, 1.8))  # crate
+			1: box_size = Vector3(rng.randf_range(0.5, 1.0), rng.randf_range(2.0, 4.0), rng.randf_range(0.5, 1.0))  # pillar
+			2: box_size = Vector3(rng.randf_range(2.0, 4.0), rng.randf_range(0.4, 0.8), rng.randf_range(1.0, 2.2))  # slab
+			_: box_size = Vector3(rng.randf_range(2.2, 3.4), rng.randf_range(2.0, 3.0), rng.randf_range(2.2, 3.4))  # big block
 		var x := rng.randf_range(-s * 0.5 + 3.0, s * 0.5 - 3.0)
 		var z := rng.randf_range(-s * 0.5 + 3.0, s * 0.5 - 3.0)
-		_add_box(Vector3(c, c, c), Vector3(x, c * 0.5, z), crate_mat)
+		if Vector2(x, z).distance_to(Vector2(0.0, 16.0)) < 4.0:
+			continue  # keep the player's spawn spot clear
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = palette[rng.randi() % palette.size()]
+		mat.roughness = 1.0
+		var prop := CSGBox3D.new()
+		prop.size = box_size
+		prop.position = Vector3(x, box_size.y * 0.5, z)
+		prop.rotation.y = rng.randf_range(0.0, TAU)
+		prop.material = mat
+		prop.use_collision = true
+		add_child(prop)
 
 func _add_box(box_size: Vector3, pos: Vector3, mat: Material) -> void:
 	var b := CSGBox3D.new()
@@ -102,6 +123,7 @@ func _build_player() -> void:
 	player.add_to_group("player")
 
 	var col := CollisionShape3D.new()
+	col.name = "Collision"
 	var capsule := CapsuleShape3D.new()
 	capsule.radius = 0.4
 	capsule.height = 1.8
@@ -146,7 +168,7 @@ func _build_hud() -> void:
 	canvas.add_child(_hud)
 	var help := Label.new()
 	help.position = Vector2(20, 50)
-	help.text = "WASD move   -   Shift sprint   -   Mouse look   -   F flashlight   -   TAB difficulty   -   Esc/click cursor"
+	help.text = "WASD move  -  Shift sprint  -  Ctrl crouch  -  Space jump  -  F flashlight  -  TAB difficulty  -  Esc cursor"
 	canvas.add_child(help)
 
 	var stam_label := Label.new()
@@ -167,6 +189,9 @@ func _build_hud() -> void:
 func _process(_delta: float) -> void:
 	if _player and _stamina_fill:
 		_stamina_fill.size.x = STAMINA_BAR_W * _player.stamina_ratio()
+		# Orange during the post-sprint cooldown, blue when refilling normally.
+		_stamina_fill.color = Color(1.0, 0.5, 0.2, 0.9) if _player.stamina_blocked() \
+			else Color(0.45, 0.78, 1.0, 0.9)
 
 func _apply_difficulty() -> void:
 	var d := Difficulty.current()

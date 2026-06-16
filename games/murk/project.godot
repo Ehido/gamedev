@@ -13,6 +13,7 @@ Difficulty="*res://scripts/Difficulty.gd"
 [rendering]
 
 environment/defaults/default_clear_color=Color(0.02, 0.02, 0.035, 1)
+anti_aliasing/quality/use_debanding=true
 environment/volumetric_fog/volume_size=96
-environment/volumetric_fog/volume_depth=160
+environment/volumetric_fog/volume_depth=180
 environment/volumetric_fog/use_filter=1
