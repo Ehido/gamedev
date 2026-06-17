@@ -1,7 +1,11 @@
-// engine3d GPU backend -- the same kind of scene rendered with REAL OpenGL
-// (GLES 3.0) instead of our CPU rasterizer. Runs headless via EGL's surfaceless
-// platform, rendering to an offscreen framebuffer, then reads the pixels back
-// to a PNG. On a real machine this is the path to real-time, interactive speed.
+// engine3d GPU backend with RAYMARCHED VOLUMETRIC FOG.
+// For each pixel we march from the camera to the surface and accumulate fog
+// density along the ray (Beer-Lambert). Density = base * height-falloff *
+// animated 3D noise, so the fog has drifting patches, pools on the floor, and
+// is naturally thicker across open space (longer ray) than near clutter.
+//
+// Headless via EGL surfaceless + Mesa. `--frames N --outdir DIR` renders an
+// orbit/flythrough so the moving, world-space fog is visible.
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
@@ -41,20 +45,58 @@ uniform vec3 uLightDir;
 uniform vec3 uCam;
 uniform vec3 uTint;
 uniform vec3 uFogColor;
-uniform float uFogStart;
-uniform float uFogEnd;
+uniform float uTime;
+uniform float uFogDensity;
+uniform float uHeightFalloff;
+uniform float uNoiseScale;
 out vec4 frag;
+
+float hash(vec3 p) {
+    p = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+float vnoise(vec3 x) {
+    vec3 i = floor(x), f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = hash(i + vec3(0,0,0)), n100 = hash(i + vec3(1,0,0));
+    float n010 = hash(i + vec3(0,1,0)), n110 = hash(i + vec3(1,1,0));
+    float n001 = hash(i + vec3(0,0,1)), n101 = hash(i + vec3(1,0,1));
+    float n011 = hash(i + vec3(0,1,1)), n111 = hash(i + vec3(1,1,1));
+    float nx00 = mix(n000, n100, f.x), nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x), nx11 = mix(n011, n111, f.x);
+    return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
+}
+// Fog density at a world point: a low floor-mist layer plus drifting 3D
+// patches, so there are clearly thin and thick pockets you move through.
+float density(vec3 p) {
+    float ground = exp(-max(p.y, 0.0) * uHeightFalloff);   // floor-hugging mist
+    vec3 q = p * uNoiseScale + vec3(uTime * 0.06, uTime * 0.015, uTime * 0.045);
+    float fb = vnoise(q) * 0.6 + vnoise(q * 2.3 + 11.0) * 0.3 + vnoise(q * 4.7 + 23.0) * 0.1;
+    float pockets = smoothstep(0.38, 0.72, fb);            // 0 clear .. 1 dense pocket
+    return uFogDensity * ground * (0.20 + 3.4 * pockets);
+}
 void main() {
     float c = mod(floor(vUV.x * 8.0) + floor(vUV.y * 8.0), 2.0);
     vec3 base = mix(uTint * 0.55, uTint, c);
-    // Per-fragment flat normal from screen-space derivatives of world pos.
     vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
     if (dot(N, normalize(uCam - vWorld)) < 0.0) N = -N;
     float lit = 0.3 + 0.85 * max(0.0, dot(N, -normalize(uLightDir)));
     vec3 col = base * lit;
-    float d = length(vWorld - uCam);
-    float fogT = clamp((d - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
-    col = mix(col, uFogColor, fogT);
+
+    // March camera -> surface, accumulating extinction.
+    vec3 rd = vWorld - uCam;
+    float dist = length(rd);
+    rd /= max(dist, 1e-4);
+    const int STEPS = 20;
+    float stepLen = dist / float(STEPS);
+    float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    float trans = 1.0;
+    for (int i = 0; i < STEPS; i++) {
+        vec3 p = uCam + rd * (stepLen * (float(i) + jitter));
+        trans *= exp(-density(p) * stepLen);
+    }
+    col = mix(uFogColor, col, trans);   // trans=1 clear, 0 full fog
     frag = vec4(col, 1.0);
 }
 )";
@@ -95,12 +137,23 @@ static GpuMesh upload(const Mesh& m) {
 }
 
 int main(int argc, char** argv) {
-    setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);  // no GPU here -> use Mesa llvmpipe
+    setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
     setenv("EGL_PLATFORM", "surfaceless", 1);
     setenv("GALLIUM_DRIVER", "llvmpipe", 1);
 
-    std::string assets = (argc > 1) ? argv[1] : "assets";
-    std::string out = (argc > 2) ? argv[2] : "gl_frame.png";
+    std::string assets = "assets";
+    std::string out = "gl_frame.png";
+    int frames = 0;
+    std::string outdir = ".";
+    int W = 960, H = 600;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
+        else if (a == "--outdir" && i + 1 < argc) outdir = argv[++i];
+        else if (a == "--assets" && i + 1 < argc) assets = argv[++i];
+        else if (a == "--size" && i + 2 < argc) { W = std::atoi(argv[++i]); H = std::atoi(argv[++i]); }
+        else out = a;
+    }
 
     EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     EGLint major, minor;
@@ -108,28 +161,21 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "EGL init failed\n");
         return 1;
     }
-    std::printf("EGL %d.%d\n", major, minor);
     eglBindAPI(EGL_OPENGL_ES_API);
-
     EGLint cfgAttr[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE,
                         EGL_OPENGL_ES3_BIT, EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8,
                         EGL_BLUE_SIZE, 8, EGL_DEPTH_SIZE, 24, EGL_NONE};
     EGLConfig cfg;
     EGLint n = 0;
-    if (!eglChooseConfig(dpy, cfgAttr, &cfg, 1, &n) || n < 1) {
-        std::fprintf(stderr, "eglChooseConfig failed\n");
-        return 1;
-    }
+    eglChooseConfig(dpy, cfgAttr, &cfg, 1, &n);
     EGLint ctxAttr[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 0, EGL_NONE};
     EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttr);
     if (ctx == EGL_NO_CONTEXT || !eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) {
-        std::fprintf(stderr, "EGL context/makeCurrent failed\n");
+        std::fprintf(stderr, "EGL context failed\n");
         return 1;
     }
-    std::printf("GL_VERSION:  %s\n", glGetString(GL_VERSION));
     std::printf("GL_RENDERER: %s\n", glGetString(GL_RENDERER));
 
-    const int W = 960, H = 600;
     GLuint colorTex;
     glGenTextures(1, &colorTex);
     glBindTexture(GL_TEXTURE_2D, colorTex);
@@ -171,8 +217,10 @@ int main(int argc, char** argv) {
     GLint uCam = glGetUniformLocation(prog, "uCam");
     GLint uTint = glGetUniformLocation(prog, "uTint");
     GLint uFogColor = glGetUniformLocation(prog, "uFogColor");
-    GLint uFogStart = glGetUniformLocation(prog, "uFogStart");
-    GLint uFogEnd = glGetUniformLocation(prog, "uFogEnd");
+    GLint uTime = glGetUniformLocation(prog, "uTime");
+    GLint uFogDensity = glGetUniformLocation(prog, "uFogDensity");
+    GLint uHeightFalloff = glGetUniformLocation(prog, "uHeightFalloff");
+    GLint uNoiseScale = glGetUniformLocation(prog, "uNoiseScale");
 
     Mesh groundM = Mesh::plane(60.f, 30.f);
     Mesh sphereM = Mesh::uvSphere(24, 36);
@@ -184,56 +232,64 @@ int main(int argc, char** argv) {
 
     glEnable(GL_DEPTH_TEST);
     glViewport(0, 0, W, H);
-    Vec3 fogColor{0.12f, 0.13f, 0.17f};
-    glClearColor(fogColor.x, fogColor.y, fogColor.z, 1.f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    Mat4 proj = perspective(60.f * 3.14159265f / 180.f, float(W) / float(H), 0.1f, 200.f);
-    Vec3 center{0.f, 1.5f, 0.f};
-    float a = 0.7f;
-    Vec3 eye{center.x + std::sin(a) * 9.5f, 5.f, center.z + std::cos(a) * 9.5f};
-    Mat4 view = lookAt(eye, center, Vec3{0.f, 1.f, 0.f});
+    Vec3 fogColor{0.55f, 0.58f, 0.66f};
 
     Vec3 ld = Vec3{-0.5f, -1.f, -0.4f}.normalized();
-    glUniform3f(uLightDir, ld.x, ld.y, ld.z);
-    glUniform3f(uCam, eye.x, eye.y, eye.z);
-    glUniform3f(uFogColor, fogColor.x, fogColor.y, fogColor.z);
-    glUniform1f(uFogStart, 10.f);
-    glUniform1f(uFogEnd, 34.f);
+    Mat4 proj = perspective(60.f * 3.14159265f / 180.f, float(W) / float(H), 0.1f, 200.f);
+    Vec3 center{0.f, 1.0f, 0.f};
 
-    auto draw = [&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
-        Mat4 mvp = proj * view * model;
-        glUniformMatrix4fv(uMVP, 1, GL_TRUE, &mvp.m[0][0]);    // GL_TRUE: row-major
-        glUniformMatrix4fv(uModel, 1, GL_TRUE, &model.m[0][0]);
-        glUniform3f(uTint, tint.x, tint.y, tint.z);
-        glBindVertexArray(o.vao);
-        glDrawArrays(GL_TRIANGLES, 0, o.count);
-    };
+    int total = frames > 0 ? frames : 1;
+    for (int f = 0; f < total; ++f) {
+        float t = float(f) * 0.6f;
+        float a = (frames > 0) ? (float(f) / frames) * 2.f * 3.14159265f : 0.7f;
+        Vec3 eye{center.x + std::sin(a) * 9.5f, 3.2f, center.z + std::cos(a) * 9.5f};
+        Mat4 view = lookAt(eye, center, Vec3{0.f, 1.f, 0.f});
 
-    draw(ground, translate({0, 0, 0}), {0.5f, 0.55f, 0.55f});
-    draw(sphere, translate({0, 1.3f, 0}) * scale({2.6f, 2.6f, 2.6f}), {0.95f, 0.5f, 0.2f});
-    draw(box, translate({-3.5f, 1, 2.5f}) * rotateY(0.4f) * scale({2, 2, 2}), {0.3f, 0.5f, 0.7f});
-    draw(box, translate({3.5f, 1.5f, -1}) * rotateY(-0.3f) * scale({2, 3, 2}), {0.3f, 0.5f, 0.7f});
-    if (haveObj)
-        draw(octa, translate({0, 3.6f, -3}) * rotateY(1.2f) * scale({1.6f, 1.6f, 1.6f}),
-             {0.4f, 0.85f, 0.5f});
+        glClearColor(fogColor.x, fogColor.y, fogColor.z, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUniform3f(uLightDir, ld.x, ld.y, ld.z);
+        glUniform3f(uCam, eye.x, eye.y, eye.z);
+        glUniform3f(uFogColor, fogColor.x, fogColor.y, fogColor.z);
+        glUniform1f(uTime, t);
+        glUniform1f(uFogDensity, 0.22f);
+        glUniform1f(uHeightFalloff, 0.32f);
+        glUniform1f(uNoiseScale, 0.22f);
 
-    glFinish();
-    std::vector<unsigned char> pix(static_cast<size_t>(W) * H * 4);
-    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, pix.data());
+        auto draw = [&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
+            Mat4 mvp = proj * view * model;
+            glUniformMatrix4fv(uMVP, 1, GL_TRUE, &mvp.m[0][0]);
+            glUniformMatrix4fv(uModel, 1, GL_TRUE, &model.m[0][0]);
+            glUniform3f(uTint, tint.x, tint.y, tint.z);
+            glBindVertexArray(o.vao);
+            glDrawArrays(GL_TRIANGLES, 0, o.count);
+        };
 
-    SDL_Init(0);
-    IMG_Init(IMG_INIT_PNG);
-    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_RGBA32);
-    SDL_LockSurface(s);
-    for (int y = 0; y < H; ++y)  // GL origin is bottom-left -> flip
-        std::memcpy(static_cast<unsigned char*>(s->pixels) + y * s->pitch,
-                    pix.data() + static_cast<size_t>(H - 1 - y) * W * 4, W * 4);
-    SDL_UnlockSurface(s);
-    IMG_SavePNG(s, out.c_str());
-    SDL_FreeSurface(s);
-    std::printf("saved %s\n", out.c_str());
+        draw(ground, translate({0, 0, 0}), {0.5f, 0.55f, 0.55f});
+        draw(sphere, translate({0, 1.3f, 0}) * scale({2.6f, 2.6f, 2.6f}), {0.95f, 0.5f, 0.2f});
+        draw(box, translate({-3.5f, 1, 2.5f}) * rotateY(0.4f) * scale({2, 2, 2}), {0.3f, 0.5f, 0.7f});
+        draw(box, translate({3.5f, 1.5f, -1}) * rotateY(-0.3f) * scale({2, 3, 2}), {0.3f, 0.5f, 0.7f});
+        if (haveObj)
+            draw(octa, translate({0, 3.6f, -3}) * rotateY(1.2f) * scale({1.6f, 1.6f, 1.6f}),
+                 {0.4f, 0.85f, 0.5f});
 
+        glFinish();
+        std::vector<unsigned char> pix(static_cast<size_t>(W) * H * 4);
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, pix.data());
+        SDL_Init(0);
+        IMG_Init(IMG_INIT_PNG);
+        SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_RGBA32);
+        SDL_LockSurface(s);
+        for (int y = 0; y < H; ++y)
+            std::memcpy(static_cast<unsigned char*>(s->pixels) + y * s->pitch,
+                        pix.data() + static_cast<size_t>(H - 1 - y) * W * 4, W * 4);
+        SDL_UnlockSurface(s);
+        char path[512];
+        if (frames > 0) std::snprintf(path, sizeof(path), "%s/fog_%03d.png", outdir.c_str(), f);
+        else std::snprintf(path, sizeof(path), "%s", out.c_str());
+        IMG_SavePNG(s, path);
+        SDL_FreeSurface(s);
+    }
+    std::printf("done\n");
     eglDestroyContext(dpy, ctx);
     eglTerminate(dpy);
     return 0;
