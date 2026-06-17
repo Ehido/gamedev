@@ -107,11 +107,20 @@ void main() {
     float stepLen = dist / float(STEPS);
     float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
     float trans = 1.0;
+    vec3 fogCol = vec3(0.0);
     for (int i = 0; i < STEPS; i++) {
         vec3 p = uCam + rd * (stepLen * (float(i) + jitter));
-        trans *= exp(-density(p) * stepLen);
+        float d = density(p);
+        if (d > 0.0001) {
+            // Each stream's grey varies dark -> light from a low-freq noise.
+            float g = gnoise(p * 0.13 + vec3(uTime * 0.05, 0.0, 0.0));
+            vec3 shade = vec3(mix(0.30, 0.92, clamp(g * 0.5 + 0.5, 0.0, 1.0)));
+            float a = 1.0 - exp(-d * stepLen);
+            fogCol += trans * a * shade;
+            trans *= (1.0 - a);
+        }
     }
-    col = mix(uFogColor, col, trans);   // trans=1 clear, 0 full fog
+    col = col * trans + fogCol;   // scene behind the fog + accumulated fog colour
     frag = vec4(col, 1.0);
 }
 )";
@@ -161,12 +170,15 @@ int main(int argc, char** argv) {
     int frames = 0;
     std::string outdir = ".";
     int W = 960, H = 600;
+    float fogDensity = 0.45f, noiseScale = 0.22f;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
         else if (a == "--outdir" && i + 1 < argc) outdir = argv[++i];
         else if (a == "--assets" && i + 1 < argc) assets = argv[++i];
         else if (a == "--size" && i + 2 < argc) { W = std::atoi(argv[++i]); H = std::atoi(argv[++i]); }
+        else if (a == "--density" && i + 1 < argc) fogDensity = std::atof(argv[++i]);
+        else if (a == "--scale" && i + 1 < argc) noiseScale = std::atof(argv[++i]);
         else out = a;
     }
 
@@ -266,9 +278,9 @@ int main(int argc, char** argv) {
         glUniform3f(uCam, eye.x, eye.y, eye.z);
         glUniform3f(uFogColor, fogColor.x, fogColor.y, fogColor.z);
         glUniform1f(uTime, t);
-        glUniform1f(uFogDensity, 0.45f);
+        glUniform1f(uFogDensity, fogDensity);
         glUniform1f(uHeightFalloff, 0.30f);
-        glUniform1f(uNoiseScale, 0.22f);
+        glUniform1f(uNoiseScale, noiseScale);
 
         auto draw = [&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
             Mat4 mvp = proj * view * model;
