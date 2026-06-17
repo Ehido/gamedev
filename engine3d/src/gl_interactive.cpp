@@ -81,6 +81,7 @@ uniform vec3 uSpotDir;
 uniform float uSpotCos;
 uniform vec3 uSpotColor;
 uniform float uSpotIntensity;
+uniform float uWindSpeed;
 out vec4 frag;
 
 vec3 hash3(vec3 p) {
@@ -103,23 +104,20 @@ float gnoise(vec3 p) {
     float nx01 = mix(n001, n101, u.x), nx11 = mix(n011, n111, u.x);
     return mix(mix(nx00, nx10, u.y), mix(nx01, nx11, u.y), u.z);
 }
-float fbm(vec3 p) {
-    float v = 0.0, a = 0.5;
-    for (int i = 0; i < 3; i++) { v += a * gnoise(p); p = p * 2.03; a *= 0.5; }
-    return v;
-}
 float density(vec3 p) {
-    vec3 wind = vec3(uTime * 0.18, 0.0, uTime * 0.05);
+    float wt = uTime * uWindSpeed;
+    // Steady drift plus a slow lateral sway: the wind direction shifts a little
+    // over time while keeping its general heading.
+    vec3 wind = vec3(0.18, 0.0, 0.05) * wt + vec3(-0.06, 0.0, 0.20) * (sin(wt * 0.5) * 0.6);
     vec3 sp = vec3(p.x * 0.40, p.y * 1.5, p.z * 0.95) * uNoiseScale + wind;
-    float w = fbm(sp * 0.7);
+    float w = gnoise(sp * 0.6);                  // cheap single-octave warp
     vec3 q = sp + vec3(0.0, 0.0, w * 0.7);
     float s = pow(1.0 - abs(gnoise(q)), 14.0);
     s = smoothstep(0.40, 0.85, s);
     float legTop = 0.6 + uFogDensity * 0.5;
     float footFog = 1.0 - smoothstep(legTop, legTop + 0.5, p.y);
     float headFog = smoothstep(1.9, 3.4, p.y);
-    float profile = max(footFog, headFog);
-    return uFogDensity * s * profile;
+    return uFogDensity * s * max(footFog, headFog);
 }
 vec3 spotInScatter(vec3 p) {
     vec3 toP = p - uSpotPos;
@@ -141,7 +139,7 @@ void main() {
     vec3 rd = vWorld - uCam;
     float dist = length(rd);
     rd /= max(dist, 1e-4);
-    const int STEPS = 32;
+    const int STEPS = 18;
     float stepLen = dist / float(STEPS);
     float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
     float trans = 1.0;
@@ -151,12 +149,13 @@ void main() {
         float streamD = density(p);
         float med = streamD + uRegFogDensity;
         float a = 1.0 - exp(-med * stepLen);
-        float g = gnoise(p * 0.13 + vec3(uTime * 0.05, 0.0, 0.0));
+        float g = gnoise(p * 0.13 + vec3(uTime * 0.05 * uWindSpeed, 0.0, 0.0));
         vec3 streamShade = vec3(mix(0.30, 0.92, clamp(g * 0.5 + 0.5, 0.0, 1.0)));
         vec3 ambient = mix(uFogColor, streamShade, clamp(streamD / max(med, 1e-4), 0.0, 1.0));
         vec3 lightCol = ambient + spotInScatter(p);
         fogCol += trans * a * lightCol;
         trans *= (1.0 - a);
+        if (trans < 0.03) break;                 // stop once fully fogged (perf)
     }
     col = col * trans + fogCol;
     frag = vec4(col, 1.0);
@@ -250,6 +249,7 @@ int main(int, char**) {
     GLint uSpotPos = glGetUniformLocation(prog, "uSpotPos"), uSpotDir = glGetUniformLocation(prog, "uSpotDir");
     GLint uSpotCos = glGetUniformLocation(prog, "uSpotCos"), uSpotColor = glGetUniformLocation(prog, "uSpotColor");
     GLint uSpotIntensity = glGetUniformLocation(prog, "uSpotIntensity");
+    GLint uWindSpeed = glGetUniformLocation(prog, "uWindSpeed");
 
     Mesh groundM = Mesh::plane(120.f, 60.f), boxM = Mesh::cube();
     GpuMesh ground = upload(groundM), box = upload(boxM);
@@ -261,7 +261,7 @@ int main(int, char**) {
 
     Vec3 pos{0.f, 1.7f, 22.f};
     float yaw = 3.14159265f, pitch = 0.f;   // looking -z
-    float fogDensity = 0.6f, noiseScale = 0.31f, regFog = 0.028f, spotI = 0.95f;
+    float fogDensity = 0.6f, noiseScale = 0.31f, regFog = 0.028f, spotI = 0.95f, windSpeed = 2.5f;
     float t = 0.f;
 
     Uint64 prev = SDL_GetPerformanceCounter();
@@ -292,6 +292,8 @@ int main(int, char**) {
                     case SDLK_4: fogDensity += 0.05f; break;
                     case SDLK_5: noiseScale = fmaxf(0.05f, noiseScale - 0.02f); break;
                     case SDLK_6: noiseScale += 0.02f; break;
+                    case SDLK_7: windSpeed = fmaxf(0.f, windSpeed - 0.5f); break;
+                    case SDLK_8: windSpeed += 0.5f; break;
                 }
             }
         }
@@ -329,6 +331,7 @@ int main(int, char**) {
         glUniform1f(uSpotCos, std::cos(22.f * 3.14159265f / 180.f));
         glUniform3f(uSpotColor, 1.0f, 0.95f, 0.82f);
         glUniform1f(uSpotIntensity, spotI);
+        glUniform1f(uWindSpeed, windSpeed);
 
         auto draw = [&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
             Mat4 mvp = proj * view * model;
