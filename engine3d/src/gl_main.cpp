@@ -86,14 +86,15 @@ float fbm(vec3 p) {
 float density(vec3 p) {
     float ground = exp(-max(p.y, 0.0) * uHeightFalloff);
     vec3 wind = vec3(uTime * 0.16, 0.0, uTime * 0.04);
-    // Strong stretch along x -> long wind lines.
-    vec3 sp = vec3(p.x * 0.12, p.y * 1.2, p.z * 0.62) * uNoiseScale + wind;
+    // Stretch along x -> long wind lines (bigger/fewer so they read distinctly).
+    vec3 sp = vec3(p.x * 0.16, p.y * 1.2, p.z * 0.62) * uNoiseScale + wind;
     // Gentle lateral waver so the lines flow instead of curling into blobs.
     float w = fbm(sp * 0.6);
     vec3 q = sp + vec3(0.0, 0.0, w * 0.9);
-    float lines = pow(1.0 - abs(gnoise(q)), 5.0);              // thin sharp lines
-    lines += 0.4 * pow(1.0 - abs(gnoise(q * 2.3 + 7.0)), 6.0); // finer wisps
-    return uFogDensity * ground * (0.03 + 5.0 * lines);
+    float lines = pow(1.0 - abs(gnoise(q)), 6.0);
+    lines += 0.4 * pow(1.0 - abs(gnoise(q * 2.1 + 7.0)), 7.0);
+    lines = smoothstep(0.28, 0.62, lines);                    // crisp edges, clear gaps
+    return uFogDensity * ground * (5.0 * lines);
 }
 void main() {
     float c = mod(floor(vUV.x * 8.0) + floor(vUV.y * 8.0), 2.0);
@@ -107,7 +108,7 @@ void main() {
     vec3 rd = vWorld - uCam;
     float dist = length(rd);
     rd /= max(dist, 1e-4);
-    const int STEPS = 20;
+    const int STEPS = 28;
     float stepLen = dist / float(STEPS);
     float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
     float trans = 1.0;
@@ -270,9 +271,9 @@ int main(int argc, char** argv) {
         glUniform3f(uCam, eye.x, eye.y, eye.z);
         glUniform3f(uFogColor, fogColor.x, fogColor.y, fogColor.z);
         glUniform1f(uTime, t);
-        glUniform1f(uFogDensity, 0.085f);
+        glUniform1f(uFogDensity, 0.11f);
         glUniform1f(uHeightFalloff, 0.30f);
-        glUniform1f(uNoiseScale, 0.16f);
+        glUniform1f(uNoiseScale, 0.10f);
 
         auto draw = [&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
             Mat4 mvp = proj * view * model;
