@@ -170,7 +170,7 @@ int main(int argc, char** argv) {
     int frames = 0;
     std::string outdir = ".";
     int W = 960, H = 600;
-    float fogDensity = 0.45f, noiseScale = 0.22f;
+    float fogDensity = 0.6f, noiseScale = 0.31f;   // locked from the variation grid (#1-#4 band)
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
