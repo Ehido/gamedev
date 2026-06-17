@@ -79,22 +79,17 @@ float fbm(vec3 p) {
     return v;
 }
 
-// Ghost-of-Tsushima-style wind LINES: features stretched hard along the wind
-// into long thin streaks (anisotropy), gently wavered rather than curled, then
-// turned into sharp lines with ridged gradient noise (peaks where it crosses
-// zero). Gradient noise keeps it smooth, not blocky. Floor-hugging.
+// Streams of fog only: pure clear air with a few thin, sharp, wind-stretched
+// strands. No ambient/floor haze -- density is zero except inside the strands.
 float density(vec3 p) {
-    float ground = exp(-max(p.y, 0.0) * uHeightFalloff);
-    vec3 wind = vec3(uTime * 0.16, 0.0, uTime * 0.04);
-    // Stretch along x -> long wind lines (bigger/fewer so they read distinctly).
-    vec3 sp = vec3(p.x * 0.16, p.y * 1.2, p.z * 0.62) * uNoiseScale + wind;
-    // Gentle lateral waver so the lines flow instead of curling into blobs.
-    float w = fbm(sp * 0.6);
-    vec3 q = sp + vec3(0.0, 0.0, w * 0.9);
-    float lines = pow(1.0 - abs(gnoise(q)), 6.0);
-    lines += 0.4 * pow(1.0 - abs(gnoise(q * 2.1 + 7.0)), 7.0);
-    lines = smoothstep(0.28, 0.62, lines);                    // crisp edges, clear gaps
-    return uFogDensity * ground * (5.0 * lines);
+    vec3 wind = vec3(uTime * 0.18, 0.0, uTime * 0.05);
+    // Streams stretched along the wind, but not so long they pile up opaque.
+    vec3 sp = vec3(p.x * 0.40, p.y * 1.5, p.z * 0.95) * uNoiseScale + wind;
+    float w = fbm(sp * 0.7);
+    vec3 q = sp + vec3(0.0, 0.0, w * 0.7);
+    float s = pow(1.0 - abs(gnoise(q)), 9.0);    // thin, sharp strand
+    s = smoothstep(0.32, 0.78, s);               // crisp; fully clear between
+    return uFogDensity * s;                       // no baseline -> streams only
 }
 void main() {
     float c = mod(floor(vUV.x * 8.0) + floor(vUV.y * 8.0), 2.0);
@@ -271,9 +266,9 @@ int main(int argc, char** argv) {
         glUniform3f(uCam, eye.x, eye.y, eye.z);
         glUniform3f(uFogColor, fogColor.x, fogColor.y, fogColor.z);
         glUniform1f(uTime, t);
-        glUniform1f(uFogDensity, 0.11f);
+        glUniform1f(uFogDensity, 0.45f);
         glUniform1f(uHeightFalloff, 0.30f);
-        glUniform1f(uNoiseScale, 0.10f);
+        glUniform1f(uNoiseScale, 0.22f);
 
         auto draw = [&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
             Mat4 mvp = proj * view * model;
