@@ -187,6 +187,41 @@ static GpuMesh upload(const Mesh& m) {
     return o;
 }
 
+// One placed box in the environment.
+struct BoxInst {
+    Vec3 pos, size, tint;
+    float rotY = 0.f;
+};
+
+// A simple foggy ruin: perimeter walls, rows of pillars, a low broken
+// partition, and scattered crates -- something to actually move through.
+static std::vector<BoxInst> buildScene() {
+    std::vector<BoxInst> v;
+    auto add = [&](Vec3 p, Vec3 s, Vec3 t, float r = 0.f) { v.push_back({p, s, t, r}); };
+    Vec3 wall{0.30f, 0.30f, 0.34f}, pillar{0.26f, 0.27f, 0.32f}, crate{0.42f, 0.34f, 0.24f};
+
+    const float zb = -38.f, zf = 30.f, zc = (zb + zf) * 0.5f, zl = zf - zb;
+    add({-11.f, 3.f, zc}, {1.f, 6.f, zl}, wall);   // left wall
+    add({11.f, 3.f, zc}, {1.f, 6.f, zl}, wall);    // right wall
+    add({0.f, 3.f, zb}, {22.f, 6.f, 1.f}, wall);   // back wall
+
+    for (float z = zf - 6.f; z > zb + 4.f; z -= 8.f) {  // two rows of pillars
+        add({-6.f, 2.5f, z}, {1.4f, 5.f, 1.4f}, pillar);
+        add({6.f, 2.5f, z}, {1.4f, 5.f, 1.4f}, pillar);
+    }
+    add({-2.f, 1.2f, -8.f}, {8.f, 2.4f, 1.f}, wall, 0.2f);  // broken partition
+
+    unsigned seed = 1234u;
+    auto rnd = [&]() { seed = seed * 1103515245u + 12345u; return ((seed >> 16) & 0x7fff) / 32767.f; };
+    for (int i = 0; i < 44; ++i) {                 // scattered crates/debris
+        float x = -8.5f + rnd() * 17.f;
+        float z = zb + 5.f + rnd() * (zl - 10.f);
+        float s = 0.6f + rnd() * 1.7f;
+        add({x, s * 0.5f, z}, {s, s, s}, crate, rnd() * 6.28f);
+    }
+    return v;
+}
+
 int main(int argc, char** argv) {
     setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
     setenv("EGL_PLATFORM", "surfaceless", 1);
@@ -296,14 +331,18 @@ int main(int argc, char** argv) {
 
     Vec3 ld = Vec3{-0.5f, -1.f, -0.4f}.normalized();
     Mat4 proj = perspective(60.f * 3.14159265f / 180.f, float(W) / float(H), 0.1f, 200.f);
-    Vec3 center{0.f, 1.4f, 0.f};   // look roughly at eye level
+    std::vector<BoxInst> scene = buildScene();
 
     int total = frames > 0 ? frames : 1;
     for (int f = 0; f < total; ++f) {
         float t = float(f) * 0.18f;
-        float a = (frames > 0) ? (float(f) / frames) * 2.f * 3.14159265f : 0.7f;
-        Vec3 eye{center.x + std::sin(a) * 8.5f, 1.7f, center.z + std::cos(a) * 8.5f};
-        Mat4 view = lookAt(eye, center, Vec3{0.f, 1.f, 0.f});
+        // Fly forward down the ruin (eye height), weaving gently.
+        float prog = (frames > 0) ? float(f) / float(frames) : 0.25f;
+        float z = 26.f - prog * 54.f;
+        float x = std::sin(prog * 6.2831853f) * 2.2f;
+        Vec3 eye{x, 1.7f, z};
+        Vec3 lookAt_{x * 0.4f, 1.5f, z - 10.f};
+        Mat4 view = lookAt(eye, lookAt_, Vec3{0.f, 1.f, 0.f});
 
         glClearColor(fogColor.x, fogColor.y, fogColor.z, 1.f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -316,7 +355,7 @@ int main(int argc, char** argv) {
         glUniform1f(uNoiseScale, noiseScale);
         glUniform1f(uRegFogDensity, 0.028f);
         // Flashlight: at the camera, pointing forward toward what we look at.
-        Vec3 spotDir = (center - eye).normalized();
+        Vec3 spotDir = (lookAt_ - eye).normalized();
         glUniform3f(uSpotPos, eye.x, eye.y, eye.z);
         glUniform3f(uSpotDir, spotDir.x, spotDir.y, spotDir.z);
         glUniform1f(uSpotCos, std::cos(22.f * 3.14159265f / 180.f));
@@ -332,13 +371,9 @@ int main(int argc, char** argv) {
             glDrawArrays(GL_TRIANGLES, 0, o.count);
         };
 
-        draw(ground, translate({0, 0, 0}), {0.5f, 0.55f, 0.55f});
-        draw(sphere, translate({0, 1.3f, 0}) * scale({2.6f, 2.6f, 2.6f}), {0.95f, 0.5f, 0.2f});
-        draw(box, translate({-3.5f, 1, 2.5f}) * rotateY(0.4f) * scale({2, 2, 2}), {0.3f, 0.5f, 0.7f});
-        draw(box, translate({3.5f, 1.5f, -1}) * rotateY(-0.3f) * scale({2, 3, 2}), {0.3f, 0.5f, 0.7f});
-        if (haveObj)
-            draw(octa, translate({0, 3.6f, -3}) * rotateY(1.2f) * scale({1.6f, 1.6f, 1.6f}),
-                 {0.4f, 0.85f, 0.5f});
+        draw(ground, translate({0, 0, 0}) * scale({1.6f, 1.f, 1.6f}), {0.42f, 0.44f, 0.46f});
+        for (const BoxInst& b : scene)
+            draw(box, translate(b.pos) * rotateY(b.rotY) * scale(b.size), b.tint);
 
         glFinish();
         std::vector<unsigned char> pix(static_cast<size_t>(W) * H * 4);
