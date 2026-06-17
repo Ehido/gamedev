@@ -12,6 +12,7 @@ struct Vec3 {
     Vec3 operator+(const Vec3& o) const { return {x + o.x, y + o.y, z + o.z}; }
     Vec3 operator-(const Vec3& o) const { return {x - o.x, y - o.y, z - o.z}; }
     Vec3 operator*(float s) const { return {x * s, y * s, z * s}; }
+    Vec3& operator+=(const Vec3& o) { x += o.x; y += o.y; z += o.z; return *this; }
     float dot(const Vec3& o) const { return x * o.x + y * o.y + z * o.z; }
     Vec3 cross(const Vec3& o) const {
         return {y * o.z - z * o.y, z * o.x - x * o.z, x * o.y - y * o.x};
