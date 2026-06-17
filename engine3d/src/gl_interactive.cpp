@@ -112,8 +112,8 @@ float density(vec3 p) {
     vec3 sp = vec3(p.x * 0.40, p.y * 1.5, p.z * 0.95) * uNoiseScale + wind;
     float w = gnoise(sp * 0.6);                  // cheap single-octave warp
     vec3 q = sp + vec3(0.0, 0.0, w * 0.7);
-    float s = pow(1.0 - abs(gnoise(q)), 14.0);
-    s = smoothstep(0.40, 0.85, s);
+    float s = pow(1.0 - abs(gnoise(q)), 10.0);   // a touch softer -> less speckle
+    s = smoothstep(0.34, 0.86, s);
     float legTop = 0.6 + uFogDensity * 0.5;
     float footFog = 1.0 - smoothstep(legTop, legTop + 0.5, p.y);
     float headFog = smoothstep(1.9, 3.4, p.y);
@@ -139,7 +139,7 @@ void main() {
     vec3 rd = vWorld - uCam;
     float dist = length(rd);
     rd /= max(dist, 1e-4);
-    const int STEPS = 18;
+    const int STEPS = 24;
     float stepLen = dist / float(STEPS);
     float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
     float trans = 1.0;
@@ -158,7 +158,7 @@ void main() {
         if (trans < 0.03) break;                 // stop once fully fogged (perf)
     }
     col = col * trans + fogCol;
-    frag = vec4(col, 1.0);
+    frag = vec4(clamp(col, 0.0, 1.0), 1.0);   // clamp so single samples can't blow to white
 }
 )";
 
