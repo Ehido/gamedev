@@ -49,6 +49,7 @@ uniform float uTime;
 uniform float uFogDensity;
 uniform float uHeightFalloff;
 uniform float uNoiseScale;
+uniform float uRegFogDensity;
 out vec4 frag;
 
 // Cheap 3D hash -> gradient vector in [-1,1]^3 (no sin).
@@ -87,8 +88,8 @@ float density(vec3 p) {
     vec3 sp = vec3(p.x * 0.40, p.y * 1.5, p.z * 0.95) * uNoiseScale + wind;
     float w = fbm(sp * 0.7);
     vec3 q = sp + vec3(0.0, 0.0, w * 0.7);
-    float s = pow(1.0 - abs(gnoise(q)), 9.0);    // thin, sharp strand
-    s = smoothstep(0.32, 0.78, s);               // crisp; fully clear between
+    float s = pow(1.0 - abs(gnoise(q)), 14.0);   // thinner, sharper strand
+    s = smoothstep(0.40, 0.85, s);               // crisp; fully clear between
     // Foot fog fills up to leg height then dissipates before the eyes; thicker
     // fog (higher density) rises higher up the legs -> exposed as a setting later.
     float legTop = 0.6 + uFogDensity * 0.5;
@@ -104,6 +105,10 @@ void main() {
     if (dot(N, normalize(uCam - vWorld)) < 0.0) N = -N;
     float lit = 0.3 + 0.85 * max(0.0, dot(N, -normalize(uLightDir)));
     vec3 col = base * lit;
+
+    // Regular grey distance fog (general atmosphere) under the volumetric streams.
+    float camDist = length(vWorld - uCam);
+    col = mix(col, uFogColor, 1.0 - exp(-camDist * uRegFogDensity));
 
     // March camera -> surface, accumulating extinction.
     vec3 rd = vWorld - uCam;
@@ -254,6 +259,7 @@ int main(int argc, char** argv) {
     GLint uFogDensity = glGetUniformLocation(prog, "uFogDensity");
     GLint uHeightFalloff = glGetUniformLocation(prog, "uHeightFalloff");
     GLint uNoiseScale = glGetUniformLocation(prog, "uNoiseScale");
+    GLint uRegFogDensity = glGetUniformLocation(prog, "uRegFogDensity");
 
     Mesh groundM = Mesh::plane(60.f, 30.f);
     Mesh sphereM = Mesh::uvSphere(24, 36);
@@ -265,7 +271,7 @@ int main(int argc, char** argv) {
 
     glEnable(GL_DEPTH_TEST);
     glViewport(0, 0, W, H);
-    Vec3 fogColor{0.55f, 0.58f, 0.66f};
+    Vec3 fogColor{0.62f, 0.63f, 0.66f};   // neutral grey atmosphere
 
     Vec3 ld = Vec3{-0.5f, -1.f, -0.4f}.normalized();
     Mat4 proj = perspective(60.f * 3.14159265f / 180.f, float(W) / float(H), 0.1f, 200.f);
@@ -287,6 +293,7 @@ int main(int argc, char** argv) {
         glUniform1f(uFogDensity, fogDensity);
         glUniform1f(uHeightFalloff, 0.30f);
         glUniform1f(uNoiseScale, noiseScale);
+        glUniform1f(uRegFogDensity, 0.028f);
 
         auto draw = [&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
             Mat4 mvp = proj * view * model;
