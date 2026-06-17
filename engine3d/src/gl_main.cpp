@@ -67,14 +67,28 @@ float vnoise(vec3 x) {
     float nx01 = mix(n001, n101, f.x), nx11 = mix(n011, n111, f.x);
     return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
 }
-// Fog density at a world point: a low floor-mist layer plus drifting 3D
-// patches, so there are clearly thin and thick pockets you move through.
+float fbm(vec3 p) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 3; i++) { v += a * vnoise(p); p = p * 2.02; a *= 0.5; }
+    return v;
+}
+
+// Windy, strand-like fog: anisotropic stretching elongates features along the
+// wind, domain warping swirls them into tendrils, and ridged noise sharpens
+// them into wisps. Still floor-hugging via the height falloff.
 float density(vec3 p) {
-    float ground = exp(-max(p.y, 0.0) * uHeightFalloff);   // floor-hugging mist
-    vec3 q = p * uNoiseScale + vec3(uTime * 0.06, uTime * 0.015, uTime * 0.045);
-    float fb = vnoise(q) * 0.6 + vnoise(q * 2.3 + 11.0) * 0.3 + vnoise(q * 4.7 + 23.0) * 0.1;
-    float pockets = smoothstep(0.38, 0.72, fb);            // 0 clear .. 1 dense pocket
-    return uFogDensity * ground * (0.20 + 3.4 * pockets);
+    float ground = exp(-max(p.y, 0.0) * uHeightFalloff);
+    vec3 wind = vec3(uTime * 0.20, 0.0, uTime * 0.07);
+    // Compress along x so features stretch into long strands along the wind.
+    vec3 sp = vec3(p.x * 0.32, p.y * 1.3, p.z * 0.95) * uNoiseScale + wind;
+    // Domain warp -> swirling filaments.
+    vec2 warp = vec2(fbm(sp + 1.7), fbm(sp + 8.3));
+    vec3 q = sp + vec3(warp.x - 0.5, 0.0, warp.y - 0.5) * 2.8;
+    // Ridged noise -> thin, sharp strands.
+    float n = fbm(q);
+    float strand = 1.0 - abs(n * 2.0 - 1.0);
+    strand = pow(strand, 3.0);
+    return uFogDensity * ground * (0.12 + 4.2 * strand);
 }
 void main() {
     float c = mod(floor(vUV.x * 8.0) + floor(vUV.y * 8.0), 2.0);
@@ -251,9 +265,9 @@ int main(int argc, char** argv) {
         glUniform3f(uCam, eye.x, eye.y, eye.z);
         glUniform3f(uFogColor, fogColor.x, fogColor.y, fogColor.z);
         glUniform1f(uTime, t);
-        glUniform1f(uFogDensity, 0.22f);
-        glUniform1f(uHeightFalloff, 0.32f);
-        glUniform1f(uNoiseScale, 0.22f);
+        glUniform1f(uFogDensity, 0.26f);
+        glUniform1f(uHeightFalloff, 0.30f);
+        glUniform1f(uNoiseScale, 0.14f);   // lower = bigger, bolder strands
 
         auto draw = [&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
             Mat4 mvp = proj * view * model;
