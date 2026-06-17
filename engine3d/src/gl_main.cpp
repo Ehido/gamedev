@@ -89,12 +89,13 @@ float density(vec3 p) {
     vec3 q = sp + vec3(0.0, 0.0, w * 0.7);
     float s = pow(1.0 - abs(gnoise(q)), 9.0);    // thin, sharp strand
     s = smoothstep(0.32, 0.78, s);               // crisp; fully clear between
-    // Height profile: fog gathers around the feet AND above the head, with the
-    // body/eye-level band left mostly clear.
-    float footFog = exp(-pow(max(p.y, 0.0) / 0.9, 2.0));  // peak at floor, gone by ~y=1.5
-    float headFog = smoothstep(1.9, 3.4, p.y);            // rises above head height
+    // Foot fog fills up to leg height then dissipates before the eyes; thicker
+    // fog (higher density) rises higher up the legs -> exposed as a setting later.
+    float legTop = 0.6 + uFogDensity * 0.5;
+    float footFog = 1.0 - smoothstep(legTop, legTop + 0.5, p.y);
+    float headFog = smoothstep(1.9, 3.4, p.y);            // above the head
     float profile = max(footFog, headFog);
-    return uFogDensity * s * profile;             // streams, gated to feet + overhead
+    return uFogDensity * s * profile;             // streams, gated to legs + overhead
 }
 void main() {
     float c = mod(floor(vUV.x * 8.0) + floor(vUV.y * 8.0), 2.0);
