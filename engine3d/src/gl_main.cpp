@@ -89,7 +89,12 @@ float density(vec3 p) {
     vec3 q = sp + vec3(0.0, 0.0, w * 0.7);
     float s = pow(1.0 - abs(gnoise(q)), 9.0);    // thin, sharp strand
     s = smoothstep(0.32, 0.78, s);               // crisp; fully clear between
-    return uFogDensity * s;                       // no baseline -> streams only
+    // Height profile: fog gathers around the feet AND above the head, with the
+    // body/eye-level band left mostly clear.
+    float footFog = exp(-pow(max(p.y, 0.0) / 0.9, 2.0));  // peak at floor, gone by ~y=1.5
+    float headFog = smoothstep(1.9, 3.4, p.y);            // rises above head height
+    float profile = max(footFog, headFog);
+    return uFogDensity * s * profile;             // streams, gated to feet + overhead
 }
 void main() {
     float c = mod(floor(vUV.x * 8.0) + floor(vUV.y * 8.0), 2.0);
@@ -263,13 +268,13 @@ int main(int argc, char** argv) {
 
     Vec3 ld = Vec3{-0.5f, -1.f, -0.4f}.normalized();
     Mat4 proj = perspective(60.f * 3.14159265f / 180.f, float(W) / float(H), 0.1f, 200.f);
-    Vec3 center{0.f, 1.0f, 0.f};
+    Vec3 center{0.f, 1.4f, 0.f};   // look roughly at eye level
 
     int total = frames > 0 ? frames : 1;
     for (int f = 0; f < total; ++f) {
         float t = float(f) * 0.18f;
         float a = (frames > 0) ? (float(f) / frames) * 2.f * 3.14159265f : 0.7f;
-        Vec3 eye{center.x + std::sin(a) * 9.5f, 3.2f, center.z + std::cos(a) * 9.5f};
+        Vec3 eye{center.x + std::sin(a) * 8.5f, 1.7f, center.z + std::cos(a) * 8.5f};
         Mat4 view = lookAt(eye, center, Vec3{0.f, 1.f, 0.f});
 
         glClearColor(fogColor.x, fogColor.y, fogColor.z, 1.f);
