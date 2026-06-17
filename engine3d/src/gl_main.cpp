@@ -50,6 +50,11 @@ uniform float uFogDensity;
 uniform float uHeightFalloff;
 uniform float uNoiseScale;
 uniform float uRegFogDensity;
+uniform vec3 uSpotPos;
+uniform vec3 uSpotDir;
+uniform float uSpotCos;
+uniform vec3 uSpotColor;
+uniform float uSpotIntensity;
 out vec4 frag;
 
 // Cheap 3D hash -> gradient vector in [-1,1]^3 (no sin).
@@ -98,6 +103,19 @@ float density(vec3 p) {
     float profile = max(footFog, headFog);
     return uFogDensity * s * profile;             // streams, gated to legs + overhead
 }
+
+// In-scattered light from a flashlight-style spotlight: bright inside the cone,
+// falling off toward the edges and with distance. This is what makes the fog
+// glow into a visible beam (god-ray / light shaft).
+vec3 spotInScatter(vec3 p) {
+    vec3 toP = p - uSpotPos;
+    float dP = length(toP);
+    vec3 dirP = toP / max(dP, 1e-4);
+    float cone = dot(dirP, uSpotDir);
+    float coneFall = smoothstep(uSpotCos, uSpotCos + (1.0 - uSpotCos) * 0.5, cone);
+    float distFall = 1.0 / (1.0 + 0.018 * dP * dP);
+    return uSpotColor * uSpotIntensity * coneFall * distFall;
+}
 void main() {
     float c = mod(floor(vUV.x * 8.0) + floor(vUV.y * 8.0), 2.0);
     vec3 base = mix(uTint * 0.55, uTint, c);
@@ -106,30 +124,28 @@ void main() {
     float lit = 0.3 + 0.85 * max(0.0, dot(N, -normalize(uLightDir)));
     vec3 col = base * lit;
 
-    // Regular grey distance fog (general atmosphere) under the volumetric streams.
-    float camDist = length(vWorld - uCam);
-    col = mix(col, uFogColor, 1.0 - exp(-camDist * uRegFogDensity));
-
-    // March camera -> surface, accumulating extinction.
+    // March camera -> surface. The medium is a light ambient grey haze plus the
+    // thin streams; at each step we add the scattered light (grey + the spotlight
+    // beam) weighted by how much fog is there.
     vec3 rd = vWorld - uCam;
     float dist = length(rd);
     rd /= max(dist, 1e-4);
-    const int STEPS = 28;
+    const int STEPS = 32;
     float stepLen = dist / float(STEPS);
     float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
     float trans = 1.0;
     vec3 fogCol = vec3(0.0);
     for (int i = 0; i < STEPS; i++) {
         vec3 p = uCam + rd * (stepLen * (float(i) + jitter));
-        float d = density(p);
-        if (d > 0.0001) {
-            // Each stream's grey varies dark -> light from a low-freq noise.
-            float g = gnoise(p * 0.13 + vec3(uTime * 0.05, 0.0, 0.0));
-            vec3 shade = vec3(mix(0.30, 0.92, clamp(g * 0.5 + 0.5, 0.0, 1.0)));
-            float a = 1.0 - exp(-d * stepLen);
-            fogCol += trans * a * shade;
-            trans *= (1.0 - a);
-        }
+        float streamD = density(p);
+        float med = streamD + uRegFogDensity;          // ambient haze + streams
+        float a = 1.0 - exp(-med * stepLen);
+        float g = gnoise(p * 0.13 + vec3(uTime * 0.05, 0.0, 0.0));
+        vec3 streamShade = vec3(mix(0.30, 0.92, clamp(g * 0.5 + 0.5, 0.0, 1.0)));
+        vec3 ambient = mix(uFogColor, streamShade, clamp(streamD / max(med, 1e-4), 0.0, 1.0));
+        vec3 lightCol = ambient + spotInScatter(p);    // grey haze + flashlight beam
+        fogCol += trans * a * lightCol;
+        trans *= (1.0 - a);
     }
     col = col * trans + fogCol;   // scene behind the fog + accumulated fog colour
     frag = vec4(col, 1.0);
@@ -260,6 +276,11 @@ int main(int argc, char** argv) {
     GLint uHeightFalloff = glGetUniformLocation(prog, "uHeightFalloff");
     GLint uNoiseScale = glGetUniformLocation(prog, "uNoiseScale");
     GLint uRegFogDensity = glGetUniformLocation(prog, "uRegFogDensity");
+    GLint uSpotPos = glGetUniformLocation(prog, "uSpotPos");
+    GLint uSpotDir = glGetUniformLocation(prog, "uSpotDir");
+    GLint uSpotCos = glGetUniformLocation(prog, "uSpotCos");
+    GLint uSpotColor = glGetUniformLocation(prog, "uSpotColor");
+    GLint uSpotIntensity = glGetUniformLocation(prog, "uSpotIntensity");
 
     Mesh groundM = Mesh::plane(60.f, 30.f);
     Mesh sphereM = Mesh::uvSphere(24, 36);
@@ -294,6 +315,13 @@ int main(int argc, char** argv) {
         glUniform1f(uHeightFalloff, 0.30f);
         glUniform1f(uNoiseScale, noiseScale);
         glUniform1f(uRegFogDensity, 0.028f);
+        // Flashlight: at the camera, pointing forward toward what we look at.
+        Vec3 spotDir = (center - eye).normalized();
+        glUniform3f(uSpotPos, eye.x, eye.y, eye.z);
+        glUniform3f(uSpotDir, spotDir.x, spotDir.y, spotDir.z);
+        glUniform1f(uSpotCos, std::cos(22.f * 3.14159265f / 180.f));
+        glUniform3f(uSpotColor, 1.0f, 0.95f, 0.82f);
+        glUniform1f(uSpotIntensity, 0.95f);
 
         auto draw = [&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
             Mat4 mvp = proj * view * model;
