@@ -251,6 +251,16 @@ int main(int, char**) {
     GLint uSpotIntensity = glGetUniformLocation(prog, "uSpotIntensity");
     GLint uWindSpeed = glGetUniformLocation(prog, "uWindSpeed");
 
+    // Cheap depth-only program for a pre-pass, so the expensive fog shader runs
+    // once per visible pixel instead of once per overlapping surface (overdraw).
+    const char* DEPTH_FS = "#version 330 core\nvoid main(){}\n";
+    GLuint dfs = compile(GL_FRAGMENT_SHADER, DEPTH_FS);
+    GLuint depthProg = glCreateProgram();
+    glAttachShader(depthProg, vs);
+    glAttachShader(depthProg, dfs);
+    glLinkProgram(depthProg);
+    GLint uMVPd = glGetUniformLocation(depthProg, "uMVP");
+
     Mesh groundM = Mesh::plane(120.f, 60.f), boxM = Mesh::cube();
     GpuMesh ground = upload(groundM), box = upload(boxM);
     std::vector<BoxInst> scene = buildScene();
@@ -313,11 +323,35 @@ int main(int, char**) {
 
         glViewport(0, 0, W, H);
         glClearColor(fogColor.x, fogColor.y, fogColor.z, 1.f);
+        glDepthMask(GL_TRUE);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         Mat4 proj = perspective(60.f * 3.14159265f / 180.f, float(W) / float(H), 0.1f, 200.f);
         Mat4 view = lookAt(pos, pos + fwd, Vec3{0, 1, 0});
 
+        // Visit every object (ground + scene boxes) with a callback.
+        auto forEach = [&](auto&& fn) {
+            fn(ground, translate({0, 0, 0}), Vec3{0.42f, 0.44f, 0.46f});
+            for (const BoxInst& b : scene)
+                fn(box, translate(b.pos) * rotateY(b.rotY) * scale(b.size), b.tint);
+        };
+
+        // 1) Depth pre-pass -- cheap shader, depth only (no overdraw of fog).
+        glUseProgram(depthProg);
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glDepthFunc(GL_LESS);
+        forEach([&](const GpuMesh& o, const Mat4& model, Vec3) {
+            Mat4 mvp = proj * view * model;
+            glUniformMatrix4fv(uMVPd, 1, GL_TRUE, &mvp.m[0][0]);
+            glBindVertexArray(o.vao);
+            glDrawArrays(GL_TRIANGLES, 0, o.count);
+        });
+
+        // 2) Colour pass -- fog shader runs only on the visible front pixels.
+        glUseProgram(prog);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDepthMask(GL_FALSE);
+        glDepthFunc(GL_LEQUAL);
         glUniform3f(uLightDir, ld.x, ld.y, ld.z);
         glUniform3f(uCam, pos.x, pos.y, pos.z);
         glUniform3f(uFogColor, fogColor.x, fogColor.y, fogColor.z);
@@ -332,19 +366,16 @@ int main(int, char**) {
         glUniform3f(uSpotColor, 1.0f, 0.95f, 0.82f);
         glUniform1f(uSpotIntensity, spotI);
         glUniform1f(uWindSpeed, windSpeed);
-
-        auto draw = [&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
+        forEach([&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
             Mat4 mvp = proj * view * model;
             glUniformMatrix4fv(uMVP, 1, GL_TRUE, &mvp.m[0][0]);
             glUniformMatrix4fv(uModel, 1, GL_TRUE, &model.m[0][0]);
             glUniform3f(uTint, tint.x, tint.y, tint.z);
             glBindVertexArray(o.vao);
             glDrawArrays(GL_TRIANGLES, 0, o.count);
-        };
-
-        draw(ground, translate({0, 0, 0}), {0.42f, 0.44f, 0.46f});
-        for (const BoxInst& b : scene)
-            draw(box, translate(b.pos) * rotateY(b.rotY) * scale(b.size), b.tint);
+        });
+        glDepthMask(GL_TRUE);
+        glDepthFunc(GL_LESS);
 
         SDL_GL_SwapWindow(win);
     }
