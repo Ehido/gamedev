@@ -51,44 +51,49 @@ uniform float uHeightFalloff;
 uniform float uNoiseScale;
 out vec4 frag;
 
-float hash(vec3 p) {
-    p = fract(p * 0.3183099 + 0.1);
-    p *= 17.0;
-    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+// Cheap 3D hash -> gradient vector in [-1,1]^3 (no sin).
+vec3 hash3(vec3 p) {
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return -1.0 + 2.0 * fract((p.xxy + p.yzz) * p.zyx);
 }
-float vnoise(vec3 x) {
-    vec3 i = floor(x), f = fract(x);
-    f = f * f * (3.0 - 2.0 * f);
-    float n000 = hash(i + vec3(0,0,0)), n100 = hash(i + vec3(1,0,0));
-    float n010 = hash(i + vec3(0,1,0)), n110 = hash(i + vec3(1,1,0));
-    float n001 = hash(i + vec3(0,0,1)), n101 = hash(i + vec3(1,0,1));
-    float n011 = hash(i + vec3(0,1,1)), n111 = hash(i + vec3(1,1,1));
-    float nx00 = mix(n000, n100, f.x), nx10 = mix(n010, n110, f.x);
-    float nx01 = mix(n001, n101, f.x), nx11 = mix(n011, n111, f.x);
-    return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
+// Gradient (Perlin-style) noise: smooth, no blocky grid. Range ~[-1,1].
+float gnoise(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
+    vec3 u = f * f * (3.0 - 2.0 * f);
+    float n000 = dot(hash3(i + vec3(0,0,0)), f - vec3(0,0,0));
+    float n100 = dot(hash3(i + vec3(1,0,0)), f - vec3(1,0,0));
+    float n010 = dot(hash3(i + vec3(0,1,0)), f - vec3(0,1,0));
+    float n110 = dot(hash3(i + vec3(1,1,0)), f - vec3(1,1,0));
+    float n001 = dot(hash3(i + vec3(0,0,1)), f - vec3(0,0,1));
+    float n101 = dot(hash3(i + vec3(1,0,1)), f - vec3(1,0,1));
+    float n011 = dot(hash3(i + vec3(0,1,1)), f - vec3(0,1,1));
+    float n111 = dot(hash3(i + vec3(1,1,1)), f - vec3(1,1,1));
+    float nx00 = mix(n000, n100, u.x), nx10 = mix(n010, n110, u.x);
+    float nx01 = mix(n001, n101, u.x), nx11 = mix(n011, n111, u.x);
+    return mix(mix(nx00, nx10, u.y), mix(nx01, nx11, u.y), u.z);
 }
 float fbm(vec3 p) {
     float v = 0.0, a = 0.5;
-    for (int i = 0; i < 3; i++) { v += a * vnoise(p); p = p * 2.02; a *= 0.5; }
+    for (int i = 0; i < 3; i++) { v += a * gnoise(p); p = p * 2.03; a *= 0.5; }
     return v;
 }
 
-// Windy, strand-like fog: anisotropic stretching elongates features along the
-// wind, domain warping swirls them into tendrils, and ridged noise sharpens
-// them into wisps. Still floor-hugging via the height falloff.
+// Ghost-of-Tsushima-style wind LINES: features stretched hard along the wind
+// into long thin streaks (anisotropy), gently wavered rather than curled, then
+// turned into sharp lines with ridged gradient noise (peaks where it crosses
+// zero). Gradient noise keeps it smooth, not blocky. Floor-hugging.
 float density(vec3 p) {
     float ground = exp(-max(p.y, 0.0) * uHeightFalloff);
-    vec3 wind = vec3(uTime * 0.20, 0.0, uTime * 0.07);
-    // Compress along x so features stretch into long strands along the wind.
-    vec3 sp = vec3(p.x * 0.32, p.y * 1.3, p.z * 0.95) * uNoiseScale + wind;
-    // Domain warp -> swirling filaments.
-    vec2 warp = vec2(fbm(sp + 1.7), fbm(sp + 8.3));
-    vec3 q = sp + vec3(warp.x - 0.5, 0.0, warp.y - 0.5) * 2.8;
-    // Ridged noise -> thin, sharp strands.
-    float n = fbm(q);
-    float strand = 1.0 - abs(n * 2.0 - 1.0);
-    strand = pow(strand, 3.0);
-    return uFogDensity * ground * (0.12 + 4.2 * strand);
+    vec3 wind = vec3(uTime * 0.16, 0.0, uTime * 0.04);
+    // Strong stretch along x -> long wind lines.
+    vec3 sp = vec3(p.x * 0.12, p.y * 1.2, p.z * 0.62) * uNoiseScale + wind;
+    // Gentle lateral waver so the lines flow instead of curling into blobs.
+    float w = fbm(sp * 0.6);
+    vec3 q = sp + vec3(0.0, 0.0, w * 0.9);
+    float lines = pow(1.0 - abs(gnoise(q)), 5.0);              // thin sharp lines
+    lines += 0.4 * pow(1.0 - abs(gnoise(q * 2.3 + 7.0)), 6.0); // finer wisps
+    return uFogDensity * ground * (0.03 + 5.0 * lines);
 }
 void main() {
     float c = mod(floor(vUV.x * 8.0) + floor(vUV.y * 8.0), 2.0);
@@ -254,7 +259,7 @@ int main(int argc, char** argv) {
 
     int total = frames > 0 ? frames : 1;
     for (int f = 0; f < total; ++f) {
-        float t = float(f) * 0.6f;
+        float t = float(f) * 0.18f;
         float a = (frames > 0) ? (float(f) / frames) * 2.f * 3.14159265f : 0.7f;
         Vec3 eye{center.x + std::sin(a) * 9.5f, 3.2f, center.z + std::cos(a) * 9.5f};
         Mat4 view = lookAt(eye, center, Vec3{0.f, 1.f, 0.f});
@@ -265,9 +270,9 @@ int main(int argc, char** argv) {
         glUniform3f(uCam, eye.x, eye.y, eye.z);
         glUniform3f(uFogColor, fogColor.x, fogColor.y, fogColor.z);
         glUniform1f(uTime, t);
-        glUniform1f(uFogDensity, 0.26f);
+        glUniform1f(uFogDensity, 0.085f);
         glUniform1f(uHeightFalloff, 0.30f);
-        glUniform1f(uNoiseScale, 0.14f);   // lower = bigger, bolder strands
+        glUniform1f(uNoiseScale, 0.16f);
 
         auto draw = [&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
             Mat4 mvp = proj * view * model;
