@@ -9,6 +9,7 @@
 #include <SDL.h>
 #include <SDL_opengl.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -298,9 +299,16 @@ static bool aabbOverlap(Vec3 p, float r, float h, const AABB& b) {
            p.z + r > b.mn.z && p.z - r < b.mx.z;
 }
 
-// A "monster" -- for now just a moving block that patrols and sends the player
-// back to the start on contact.
-struct Monster { Vec3 pos, vel, size; };
+// Monster archetypes (all just moving blocks for now). Touching any sends the
+// player back to the start.
+enum MType { M_CHASE, M_DASH, M_BRUTE, M_DART, M_WALL };
+struct Monster {
+    Vec3 pos, vel, size, color;
+    int type = M_CHASE;
+    float speed = 3.f;
+    float timer = 0.f;   // dash cadence / wall reposition
+    bool dashing = false;
+};
 
 int main(int, char**) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { SDL_Log("SDL init: %s", SDL_GetError()); return 1; }
@@ -404,10 +412,23 @@ int main(int, char**) {
     // Monsters: patrolling blocks. Touch one and you're sent back to the start.
     // Reaching the exit (far end) advances the level and adds another monster.
     std::vector<Monster> monsters;
-    auto addMonster = [&](float x, float z, Vec3 v) { monsters.push_back({ {x, 0.9f, z}, v, {1.4f, 1.8f, 1.4f} }); };
-    addMonster(-4.f, 2.f, {0.f, 0.f, 4.5f});
-    addMonster(4.f, -10.f, {0.f, 0.f, -5.5f});
-    addMonster(0.f, -22.f, {3.5f, 0.f, 0.f});
+    auto addMon = [&](int type, Vec3 sp) {
+        Monster m; m.type = type; m.pos = sp;
+        switch (type) {
+            case M_CHASE: m.size = {1.4f, 1.8f, 1.4f}; m.speed = 3.0f; m.color = {0.85f, 0.15f, 0.13f}; break;
+            case M_DASH:  m.size = {1.2f, 1.7f, 1.2f}; m.speed = 2.5f; m.color = {1.0f, 0.45f, 0.1f}; m.timer = 3.0f; break;
+            case M_BRUTE: m.size = {2.8f, 3.0f, 2.8f}; m.speed = 1.5f; m.color = {0.5f, 0.08f, 0.08f}; break;
+            case M_DART:  m.size = {0.8f, 1.1f, 0.8f}; m.speed = 5.5f; m.color = {1.0f, 0.3f, 0.5f}; break;
+            case M_WALL:  m.size = {5.0f, 3.0f, 0.6f}; m.speed = 0.0f; m.color = {0.6f, 0.1f, 0.5f}; m.timer = 4.0f; break;
+        }
+        m.pos.y = m.size.y * 0.5f;
+        monsters.push_back(m);
+    };
+    addMon(M_CHASE, {-4.f, 0.f, 6.f});
+    addMon(M_BRUTE, {4.f, 0.f, -8.f});
+    addMon(M_DART, {0.f, 0.f, -20.f});
+    addMon(M_DASH, {-3.f, 0.f, -28.f});
+    addMon(M_WALL, {0.f, 0.f, -14.f});
     int level = 1;
     float yaw = 3.14159265f, pitch = 0.f;
     float fogDensity = 0.6f, noiseScale = 0.31f, regFog = 0.028f, spotI = 0.7f, windSpeed = 2.5f;
@@ -482,21 +503,40 @@ int main(int, char**) {
         }
         if (pos.y < 0.f) { pos.y = 0.f; vel.y = 0.f; onGround = true; }
 
-        // Monsters move + bounce; touching one reverts you to the start.
+        // Monsters: each type hunts differently; touching any sends you back.
         for (Monster& m : monsters) {
-            m.pos = m.pos + m.vel * dt;
-            if (m.pos.z > 26.f) { m.pos.z = 26.f; m.vel.z = -fabsf(m.vel.z); }
-            if (m.pos.z < -36.f) { m.pos.z = -36.f; m.vel.z = fabsf(m.vel.z); }
-            if (m.pos.x > 9.f) { m.pos.x = 9.f; m.vel.x = -fabsf(m.vel.x); }
-            if (m.pos.x < -9.f) { m.pos.x = -9.f; m.vel.x = fabsf(m.vel.x); }
+            Vec3 toP{pos.x - m.pos.x, 0.f, pos.z - m.pos.z};
+            float distXZ = toP.length();
+            Vec3 dir = distXZ > 0.001f ? toP * (1.f / distXZ) : Vec3{0, 0, 0};
+            if (m.type == M_WALL) {
+                m.timer -= dt;
+                if (m.timer <= 0.f) {                       // appear in front of the player
+                    m.pos.x = std::clamp(pos.x + fwdH.x * 7.f, -8.f, 8.f);
+                    m.pos.z = std::clamp(pos.z + fwdH.z * 7.f, -35.f, 25.f);
+                    m.timer = 4.0f;
+                }
+            } else {
+                float sp = m.speed;
+                if (m.type == M_DASH) {                     // periodic fast lunge
+                    m.timer -= dt;
+                    if (m.dashing) { sp = 11.f; if (m.timer <= 0.f) { m.dashing = false; m.timer = 3.0f; } }
+                    else if (m.timer <= 0.f) { m.dashing = true; m.timer = 0.45f; }
+                }
+                m.pos.x += dir.x * sp * dt;                 // chase the player
+                m.pos.z += dir.z * sp * dt;
+            }
+            m.pos.x = std::clamp(m.pos.x, -9.f, 9.f);
+            m.pos.z = std::clamp(m.pos.z, -36.f, 26.f);
+            m.pos.y = m.size.y * 0.5f;
             Vec3 hs = m.size * 0.5f;
             AABB mb{ {m.pos.x - hs.x, m.pos.y - hs.y, m.pos.z - hs.z}, {m.pos.x + hs.x, m.pos.y + hs.y, m.pos.z + hs.z} };
             if (aabbOverlap(pos, rad, playerH, mb)) { pos = spawnPos; vel = Vec3{0, 0, 0}; }
         }
-        // Reached the exit at the far end? Escaped -> next level, one more monster.
+        // Reached the exit? Escaped -> next level + another monster (cycle types).
         if (pos.z < -34.f && fabsf(pos.x) < 3.f) {
             ++level;
-            addMonster(level % 2 ? -6.f : 6.f, 0.f, {0.f, 0.f, level % 2 ? 5.f : -5.f});
+            int tt[5] = {M_CHASE, M_DART, M_DASH, M_BRUTE, M_WALL};
+            addMon(tt[level % 5], Vec3{level % 2 ? -6.f : 6.f, 0.f, -5.f});
             pos = spawnPos; vel = Vec3{0, 0, 0};
         }
 
@@ -532,7 +572,7 @@ int main(int, char**) {
         };
         drawGeo(ground, translate({0, 0, 0}), {0.42f, 0.44f, 0.46f});
         for (const BoxInst& b : scene) drawGeo(box, translate(b.pos) * rotateY(b.rotY) * scale(b.size), b.tint);
-        for (const Monster& m : monsters) drawGeo(box, translate(m.pos) * scale(m.size), {0.85f, 0.15f, 0.13f});
+        for (const Monster& m : monsters) drawGeo(box, translate(m.pos) * scale(m.size), m.color);
         drawGeo(box, translate({0.f, 1.2f, -36.f}) * scale({4.f, 2.4f, 0.4f}), {0.2f, 0.9f, 0.35f});  // exit
 
         // ---- 2) Fog pass (low res) ----
