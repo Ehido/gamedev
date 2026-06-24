@@ -35,7 +35,18 @@
     X(PFNGLVERTEXATTRIBPOINTERPROC, glVertexAttribPointer) \
     X(PFNGLUNIFORMMATRIX4FVPROC, glUniformMatrix4fv) \
     X(PFNGLUNIFORM3FPROC, glUniform3f) \
-    X(PFNGLUNIFORM1FPROC, glUniform1f)
+    X(PFNGLUNIFORM1FPROC, glUniform1f) \
+    X(PFNGLGENFRAMEBUFFERSPROC, glGenFramebuffers) \
+    X(PFNGLBINDFRAMEBUFFERPROC, glBindFramebuffer) \
+    X(PFNGLFRAMEBUFFERTEXTURE2DPROC, glFramebufferTexture2D) \
+    X(PFNGLGENRENDERBUFFERSPROC, glGenRenderbuffers) \
+    X(PFNGLBINDRENDERBUFFERPROC, glBindRenderbuffer) \
+    X(PFNGLRENDERBUFFERSTORAGEPROC, glRenderbufferStorage) \
+    X(PFNGLFRAMEBUFFERRENDERBUFFERPROC, glFramebufferRenderbuffer) \
+    X(PFNGLCHECKFRAMEBUFFERSTATUSPROC, glCheckFramebufferStatus) \
+    X(PFNGLBLITFRAMEBUFFERPROC, glBlitFramebuffer) \
+    X(PFNGLDELETEFRAMEBUFFERSPROC, glDeleteFramebuffers) \
+    X(PFNGLDELETERENDERBUFFERSPROC, glDeleteRenderbuffers)
 
 #define X(type, name) static type name = nullptr;
 GLFUNCS
@@ -211,7 +222,22 @@ static std::vector<BoxInst> buildScene() {
         float x = -8.5f + rnd() * 17.f, z = zb + 5.f + rnd() * (zl - 10.f), s = 0.6f + rnd() * 1.7f;
         add({x, s * 0.5f, z}, {s, s, s}, crate, rnd() * 6.28f);
     }
+    // A parkour line: stepped platforms (~0.7m rise each) to jump up.
+    Vec3 plat{0.40f, 0.42f, 0.50f};
+    add({0.f, 0.5f, 14.f}, {3.f, 1.f, 3.f}, plat);
+    add({4.f, 1.2f, 10.f}, {2.f, 1.f, 2.f}, plat);
+    add({1.f, 1.9f, 6.f}, {2.f, 1.f, 2.f}, plat);
+    add({-3.f, 2.6f, 3.f}, {2.f, 1.f, 2.f}, plat);
+    add({0.f, 3.3f, -1.f}, {3.f, 1.f, 3.f}, plat);
     return v;
+}
+
+// Axis-aligned box collider (rotation ignored -- fine for blocky collision).
+struct AABB { Vec3 mn, mx; };
+static bool aabbOverlap(Vec3 p, float r, float h, const AABB& b) {
+    return p.x + r > b.mn.x && p.x - r < b.mx.x &&
+           p.y + h > b.mn.y && p.y < b.mx.y &&
+           p.z + r > b.mn.z && p.z - r < b.mx.z;
 }
 
 int main(int, char**) {
@@ -265,13 +291,47 @@ int main(int, char**) {
     GpuMesh ground = upload(groundM), box = upload(boxM);
     std::vector<BoxInst> scene = buildScene();
 
+    // Collision boxes (axis-aligned) from the scene.
+    std::vector<AABB> solids;
+    for (const BoxInst& b : scene) {
+        Vec3 h = b.size * 0.5f;
+        solids.push_back({ {b.pos.x - h.x, b.pos.y - h.y, b.pos.z - h.z},
+                           {b.pos.x + h.x, b.pos.y + h.y, b.pos.z + h.z} });
+    }
+
     glEnable(GL_DEPTH_TEST);
     Vec3 fogColor{0.62f, 0.63f, 0.66f};
     Vec3 ld = Vec3{-0.5f, -1.f, -0.4f}.normalized();
 
-    Vec3 pos{0.f, 1.7f, 22.f};
+    // Half-resolution fog target: render scene+fog into a smaller framebuffer,
+    // then upscale to the window. ~4x cheaper for the heavy fog shader.
+    GLuint fbo = 0, fboColor = 0, fboDepth = 0; int fboW = 0, fboH = 0;
+    auto ensureFBO = [&](int rw, int rh) {
+        if (fbo && fboW == rw && fboH == rh) return;
+        if (fbo) { glDeleteFramebuffers(1, &fbo); glDeleteTextures(1, &fboColor); glDeleteRenderbuffers(1, &fboDepth); }
+        fboW = rw; fboH = rh;
+        glGenTextures(1, &fboColor);
+        glBindTexture(GL_TEXTURE_2D, fboColor);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, rw, rh, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glGenRenderbuffers(1, &fboDepth);
+        glBindRenderbuffer(GL_RENDERBUFFER, fboDepth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, rw, rh);
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fboColor, 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, fboDepth);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    };
+
+    // Player physics (feet position).
+    Vec3 pos{0.f, 0.f, 22.f};
+    Vec3 vel{0.f, 0.f, 0.f};
+    bool onGround = false;
     float yaw = 3.14159265f, pitch = 0.f;   // looking -z
     float fogDensity = 0.6f, noiseScale = 0.31f, regFog = 0.028f, spotI = 0.95f, windSpeed = 2.5f;
+    int renderScale = 2;                     // 1 = full res, 2 = half res (faster)
     float t = 0.f;
 
     Uint64 prev = SDL_GetPerformanceCounter();
@@ -304,6 +364,9 @@ int main(int, char**) {
                     case SDLK_6: noiseScale += 0.02f; break;
                     case SDLK_7: windSpeed = fmaxf(0.f, windSpeed - 0.5f); break;
                     case SDLK_8: windSpeed += 0.5f; break;
+                    case SDLK_SPACE: if (onGround) vel.y = 8.0f; break;
+                    case SDLK_9: renderScale = 1; break;   // full res (sharper)
+                    case SDLK_0: renderScale = 2; break;   // half res (faster)
                 }
             }
         }
@@ -312,22 +375,46 @@ int main(int, char**) {
         Vec3 fwdH = Vec3{fwd.x, 0.f, fwd.z}.normalized();
         Vec3 right = fwdH.cross(Vec3{0, 1, 0}).normalized();
         const Uint8* k = SDL_GetKeyboardState(nullptr);
-        float spd = (k[SDL_SCANCODE_LSHIFT] ? 9.f : 4.5f);
-        Vec3 move{0, 0, 0};
-        if (k[SDL_SCANCODE_W]) move += fwdH;
-        if (k[SDL_SCANCODE_S]) move = move - fwdH;
-        if (k[SDL_SCANCODE_D]) move += right;
-        if (k[SDL_SCANCODE_A]) move = move - right;
-        if (move.length() > 0.001f) pos += move.normalized() * (spd * dt);
-        pos.y = 1.7f;
+        bool crouch = k[SDL_SCANCODE_LCTRL] || k[SDL_SCANCODE_RCTRL];
+        float eyeH = crouch ? 0.95f : 1.6f;
+        float playerH = crouch ? 1.2f : 1.8f;
+        const float rad = 0.3f;
+        float spd = (k[SDL_SCANCODE_LSHIFT] ? 8.f : 4.5f) * (crouch ? 0.5f : 1.f);
+        Vec3 wish{0, 0, 0};
+        if (k[SDL_SCANCODE_W]) wish += fwdH;
+        if (k[SDL_SCANCODE_S]) wish = wish - fwdH;
+        if (k[SDL_SCANCODE_D]) wish += right;
+        if (k[SDL_SCANCODE_A]) wish = wish - right;
+        if (wish.length() > 0.001f) wish = wish.normalized();
+        vel.x = wish.x * spd;
+        vel.z = wish.z * spd;
+        vel.y -= 24.f * dt;                                  // gravity
 
-        glViewport(0, 0, W, H);
+        // Integrate + resolve collisions one axis at a time vs the solid boxes.
+        pos.x += vel.x * dt;
+        for (const AABB& b : solids) if (aabbOverlap(pos, rad, playerH, b)) { pos.x = (vel.x > 0.f ? b.mn.x - rad : b.mx.x + rad); vel.x = 0.f; }
+        pos.z += vel.z * dt;
+        for (const AABB& b : solids) if (aabbOverlap(pos, rad, playerH, b)) { pos.z = (vel.z > 0.f ? b.mn.z - rad : b.mx.z + rad); vel.z = 0.f; }
+        pos.y += vel.y * dt;
+        onGround = false;
+        for (const AABB& b : solids) if (aabbOverlap(pos, rad, playerH, b)) {
+            if (vel.y <= 0.f) { pos.y = b.mx.y; onGround = true; } else { pos.y = b.mn.y - playerH; }
+            vel.y = 0.f;
+        }
+        if (pos.y < 0.f) { pos.y = 0.f; vel.y = 0.f; onGround = true; }
+        Vec3 eye = pos + Vec3{0.f, eyeH, 0.f};
+
+        int rw = (W / renderScale < 1) ? 1 : W / renderScale;
+        int rh = (H / renderScale < 1) ? 1 : H / renderScale;
+        ensureFBO(rw, rh);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glViewport(0, 0, rw, rh);
         glClearColor(fogColor.x, fogColor.y, fogColor.z, 1.f);
         glDepthMask(GL_TRUE);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         Mat4 proj = perspective(60.f * 3.14159265f / 180.f, float(W) / float(H), 0.1f, 200.f);
-        Mat4 view = lookAt(pos, pos + fwd, Vec3{0, 1, 0});
+        Mat4 view = lookAt(eye, eye + fwd, Vec3{0, 1, 0});
 
         // Visit every object (ground + scene boxes) with a callback.
         auto forEach = [&](auto&& fn) {
@@ -353,14 +440,14 @@ int main(int, char**) {
         glDepthMask(GL_FALSE);
         glDepthFunc(GL_LEQUAL);
         glUniform3f(uLightDir, ld.x, ld.y, ld.z);
-        glUniform3f(uCam, pos.x, pos.y, pos.z);
+        glUniform3f(uCam, eye.x, eye.y, eye.z);
         glUniform3f(uFogColor, fogColor.x, fogColor.y, fogColor.z);
         glUniform1f(uTime, t);
         glUniform1f(uFogDensity, fogDensity);
         glUniform1f(uHeightFalloff, 0.30f);
         glUniform1f(uNoiseScale, noiseScale);
         glUniform1f(uRegFogDensity, regFog);
-        glUniform3f(uSpotPos, pos.x, pos.y, pos.z);
+        glUniform3f(uSpotPos, eye.x, eye.y, eye.z);
         glUniform3f(uSpotDir, fwd.x, fwd.y, fwd.z);
         glUniform1f(uSpotCos, std::cos(22.f * 3.14159265f / 180.f));
         glUniform3f(uSpotColor, 1.0f, 0.95f, 0.82f);
@@ -376,6 +463,12 @@ int main(int, char**) {
         });
         glDepthMask(GL_TRUE);
         glDepthFunc(GL_LESS);
+
+        // Upscale the half-res render to the window.
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        glBlitFramebuffer(0, 0, rw, rh, 0, 0, W, H, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
         SDL_GL_SwapWindow(win);
     }
