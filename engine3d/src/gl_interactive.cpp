@@ -1,6 +1,10 @@
 // engine3d -- interactive first-person walk-through (Windows / desktop OpenGL).
-// SDL2 window + OpenGL 3.3 core. WASD move, mouse look, Shift sprint, F toggles
-// the flashlight, 1-6 tune the fog live, Esc quits. Walk through the foggy ruin.
+// Deferred fog renderer: geometry is drawn crisp at full resolution, the heavy
+// volumetric fog is raymarched at low resolution, and the two are composited.
+// This keeps edges sharp while making the fog cheap.
+//
+// WASD move, Space jump, Ctrl crouch, Shift sprint, mouse look, F flashlight,
+// 1-8 tune the fog, 9/0 sharper/faster fog, Esc quits.
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -12,7 +16,7 @@
 #include "math3d.h"
 #include "mesh.h"
 
-// --- Load the GL 2.0+ entry points (not exported by opengl32 on Windows) ----
+// --- Load GL 2.0+ / FBO entry points (not exported by opengl32 on Windows) ---
 #define GLFUNCS \
     X(PFNGLCREATESHADERPROC, glCreateShader) \
     X(PFNGLSHADERSOURCEPROC, glShaderSource) \
@@ -41,27 +45,26 @@
     X(PFNGLGENFRAMEBUFFERSPROC, glGenFramebuffers) \
     X(PFNGLBINDFRAMEBUFFERPROC, glBindFramebuffer) \
     X(PFNGLFRAMEBUFFERTEXTURE2DPROC, glFramebufferTexture2D) \
-    X(PFNGLGENRENDERBUFFERSPROC, glGenRenderbuffers) \
-    X(PFNGLBINDRENDERBUFFERPROC, glBindRenderbuffer) \
-    X(PFNGLRENDERBUFFERSTORAGEPROC, glRenderbufferStorage) \
-    X(PFNGLFRAMEBUFFERRENDERBUFFERPROC, glFramebufferRenderbuffer) \
     X(PFNGLCHECKFRAMEBUFFERSTATUSPROC, glCheckFramebufferStatus) \
-    X(PFNGLBLITFRAMEBUFFERPROC, glBlitFramebuffer) \
-    X(PFNGLDELETEFRAMEBUFFERSPROC, glDeleteFramebuffers) \
-    X(PFNGLDELETERENDERBUFFERSPROC, glDeleteRenderbuffers)
+    X(PFNGLDELETEFRAMEBUFFERSPROC, glDeleteFramebuffers)
 
 #define X(type, name) static type name = nullptr;
 GLFUNCS
 #undef X
+// glActiveTexture is already declared by gl.h (GL 1.3), so load it separately.
+static PFNGLACTIVETEXTUREPROC pglActiveTexture = nullptr;
 
 static bool loadGL() {
     bool ok = true;
 #define X(type, name) name = reinterpret_cast<type>(SDL_GL_GetProcAddress(#name)); if (!name) ok = false;
     GLFUNCS
 #undef X
+    pglActiveTexture = reinterpret_cast<PFNGLACTIVETEXTUREPROC>(SDL_GL_GetProcAddress("glActiveTexture"));
+    if (!pglActiveTexture) ok = false;
     return ok;
 }
 
+// Geometry vertex shader.
 static const char* VS = R"(#version 330 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec2 aUV;
@@ -77,24 +80,54 @@ void main() {
 }
 )";
 
-static const char* FS = R"(#version 330 core
+// Geometry fragment shader: lit checker + coloured point lights. NO fog.
+static const char* SCENE_FS = R"(#version 330 core
 in vec3 vWorld;
 in vec2 vUV;
 uniform vec3 uLightDir;
 uniform vec3 uCam;
 uniform vec3 uTint;
+uniform int uNumLights;
+uniform vec3 uLightPos[8];
+uniform vec3 uLightCol[8];
+out vec4 frag;
+void main() {
+    float c = mod(floor(vUV.x * 8.0) + floor(vUV.y * 8.0), 2.0);
+    vec3 base = mix(uTint * 0.55, uTint, c);
+    vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+    if (dot(N, normalize(uCam - vWorld)) < 0.0) N = -N;
+    vec3 col = base * (0.3 + 0.85 * max(0.0, dot(N, -normalize(uLightDir))));
+    for (int i = 0; i < uNumLights; i++) {
+        vec3 L = uLightPos[i] - vWorld;
+        float d = length(L);
+        float att = 1.0 / (1.0 + 0.15 * d * d);
+        col += base * uLightCol[i] * (max(0.0, dot(N, L / max(d, 1e-4))) * att);
+    }
+    frag = vec4(col, 1.0);
+}
+)";
+
+// Fullscreen-triangle vertex shader (no vertex buffer needed).
+static const char* FULL_VS = R"(#version 330 core
+out vec2 vUv;
+void main() {
+    vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
+    vUv = p * 0.5 + 0.5;
+    gl_Position = vec4(p, 0.0, 1.0);
+}
+)";
+
+// Fog fragment shader: reconstruct each pixel's surface from the depth texture,
+// raymarch camera->surface accumulating fog. Output rgb=inscatter, a=transmittance.
+static const char* FOG_FS = R"(#version 330 core
+in vec2 vUv;
+uniform sampler2D uDepth;
+uniform vec3 uCam, uFwd, uRight, uUp;
+uniform float uTanHalf, uAspect, uNear, uFar;
 uniform vec3 uFogColor;
-uniform float uTime;
-uniform float uFogDensity;
-uniform float uHeightFalloff;
-uniform float uNoiseScale;
-uniform float uRegFogDensity;
-uniform vec3 uSpotPos;
-uniform vec3 uSpotDir;
-uniform float uSpotCos;
-uniform vec3 uSpotColor;
-uniform float uSpotIntensity;
-uniform float uWindSpeed;
+uniform float uTime, uFogDensity, uHeightFalloff, uNoiseScale, uRegFogDensity, uWindSpeed;
+uniform vec3 uSpotPos, uSpotDir, uSpotColor;
+uniform float uSpotCos, uSpotIntensity;
 uniform int uNumLights;
 uniform vec3 uLightPos[8];
 uniform vec3 uLightCol[8];
@@ -122,13 +155,11 @@ float gnoise(vec3 p) {
 }
 float density(vec3 p) {
     float wt = uTime * uWindSpeed;
-    // Steady drift plus a slow lateral sway: the wind direction shifts a little
-    // over time while keeping its general heading.
     vec3 wind = vec3(0.18, 0.0, 0.05) * wt + vec3(-0.06, 0.0, 0.20) * (sin(wt * 0.5) * 0.6);
     vec3 sp = vec3(p.x * 0.40, p.y * 1.5, p.z * 0.95) * uNoiseScale + wind;
-    float w = gnoise(sp * 0.6);                  // cheap single-octave warp
+    float w = gnoise(sp * 0.6);
     vec3 q = sp + vec3(0.0, 0.0, w * 0.7);
-    float s = pow(1.0 - abs(gnoise(q)), 10.0);   // a touch softer -> less speckle
+    float s = pow(1.0 - abs(gnoise(q)), 10.0);
     s = smoothstep(0.34, 0.86, s);
     float legTop = 0.6 + uFogDensity * 0.5;
     float footFog = 1.0 - smoothstep(legTop, legTop + 0.5, p.y);
@@ -139,30 +170,22 @@ vec3 spotInScatter(vec3 p) {
     vec3 toP = p - uSpotPos;
     float dP = length(toP);
     vec3 dirP = toP / max(dP, 1e-4);
-    float cone = dot(dirP, uSpotDir);
-    float coneFall = smoothstep(uSpotCos, uSpotCos + (1.0 - uSpotCos) * 0.5, cone);
-    float distFall = 1.0 / (1.0 + 0.018 * dP * dP);
-    return uSpotColor * uSpotIntensity * coneFall * distFall;
+    float coneFall = smoothstep(uSpotCos, uSpotCos + (1.0 - uSpotCos) * 0.5, dot(dirP, uSpotDir));
+    return uSpotColor * uSpotIntensity * coneFall * (1.0 / (1.0 + 0.018 * dP * dP));
 }
 void main() {
-    float c = mod(floor(vUV.x * 8.0) + floor(vUV.y * 8.0), 2.0);
-    vec3 base = mix(uTint * 0.55, uTint, c);
-    vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
-    if (dot(N, normalize(uCam - vWorld)) < 0.0) N = -N;
-    float lit = 0.3 + 0.85 * max(0.0, dot(N, -normalize(uLightDir)));
-    vec3 col = base * lit;
-    // Coloured point lights (room lamps) lighting the surfaces.
-    for (int i = 0; i < uNumLights; i++) {
-        vec3 L = uLightPos[i] - vWorld;
-        float d = length(L);
-        float att = 1.0 / (1.0 + 0.15 * d * d);
-        col += base * uLightCol[i] * (max(0.0, dot(N, L / max(d, 1e-4))) * att);
+    vec2 ndc = vUv * 2.0 - 1.0;
+    vec3 rd = normalize(uFwd + uRight * (ndc.x * uTanHalf * uAspect) + uUp * (ndc.y * uTanHalf));
+    float depth = texture(uDepth, vUv).r;
+    float dist;
+    if (depth >= 0.9999) {
+        dist = uFar;                                  // no geometry -> march to far
+    } else {
+        float zndc = depth * 2.0 - 1.0;
+        float zeye = (2.0 * uNear * uFar) / (uNear + uFar - zndc * (uFar - uNear));
+        dist = zeye / max(dot(rd, uFwd), 1e-3);
     }
-
-    vec3 rd = vWorld - uCam;
-    float dist = length(rd);
-    rd /= max(dist, 1e-4);
-    const int STEPS = 24;
+    const int STEPS = 14;
     float stepLen = dist / float(STEPS);
     float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
     float trans = 1.0;
@@ -176,16 +199,28 @@ void main() {
         vec3 streamShade = vec3(mix(0.30, 0.92, clamp(g * 0.5 + 0.5, 0.0, 1.0)));
         vec3 ambient = mix(uFogColor, streamShade, clamp(streamD / max(med, 1e-4), 0.0, 1.0));
         vec3 lightCol = ambient + spotInScatter(p);
-        for (int li = 0; li < uNumLights; li++) {   // lamps glow in the fog
+        for (int li = 0; li < uNumLights; li++) {
             vec3 L = uLightPos[li] - p;
             lightCol += uLightCol[li] * (1.0 / (1.0 + 0.25 * dot(L, L)));
         }
         fogCol += trans * a * lightCol;
         trans *= (1.0 - a);
-        if (trans < 0.03) break;                 // stop once fully fogged (perf)
+        if (trans < 0.03) break;
     }
-    col = col * trans + fogCol;
-    frag = vec4(clamp(col, 0.0, 1.0), 1.0);   // clamp so single samples can't blow to white
+    frag = vec4(fogCol, trans);
+}
+)";
+
+// Composite: full-res scene * fog.transmittance + fog.inscatter.
+static const char* COMP_FS = R"(#version 330 core
+in vec2 vUv;
+uniform sampler2D uScene;
+uniform sampler2D uFog;
+out vec4 frag;
+void main() {
+    vec3 scene = texture(uScene, vUv).rgb;
+    vec4 fog = texture(uFog, vUv);
+    frag = vec4(clamp(scene * fog.a + fog.rgb, 0.0, 1.0), 1.0);
 }
 )";
 
@@ -198,9 +233,17 @@ static GLuint compile(GLenum type, const char* src) {
     if (!ok) { char log[2048]; glGetShaderInfoLog(s, sizeof(log), nullptr, log); SDL_Log("shader: %s", log); }
     return s;
 }
+static GLuint link(const char* vs, const char* fs) {
+    GLuint p = glCreateProgram();
+    glAttachShader(p, compile(GL_VERTEX_SHADER, vs));
+    glAttachShader(p, compile(GL_FRAGMENT_SHADER, fs));
+    glLinkProgram(p);
+    GLint ok = 0; glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) { char log[2048]; glGetProgramInfoLog(p, sizeof(log), nullptr, log); SDL_Log("link: %s", log); }
+    return p;
+}
 
 struct GpuMesh { GLuint vao = 0, vbo = 0; int count = 0; };
-
 static GpuMesh upload(const Mesh& m) {
     GpuMesh o;
     o.count = static_cast<int>(m.verts.size());
@@ -218,7 +261,6 @@ static GpuMesh upload(const Mesh& m) {
 }
 
 struct BoxInst { Vec3 pos, size, tint; float rotY = 0.f; };
-
 static std::vector<BoxInst> buildScene() {
     std::vector<BoxInst> v;
     auto add = [&](Vec3 p, Vec3 s, Vec3 t, float r = 0.f) { v.push_back({p, s, t, r}); };
@@ -240,7 +282,6 @@ static std::vector<BoxInst> buildScene() {
         float x = -8.5f + rnd() * 17.f, z = zb + 5.f + rnd() * (zl - 10.f), s = 0.6f + rnd() * 1.7f;
         add({x, s * 0.5f, z}, {s, s, s}, crate, rnd() * 6.28f);
     }
-    // A parkour line: stepped platforms (~0.7m rise each) to jump up.
     Vec3 plat{0.40f, 0.42f, 0.50f};
     add({0.f, 0.5f, 14.f}, {3.f, 1.f, 3.f}, plat);
     add({4.f, 1.2f, 10.f}, {2.f, 1.f, 2.f}, plat);
@@ -250,7 +291,6 @@ static std::vector<BoxInst> buildScene() {
     return v;
 }
 
-// Axis-aligned box collider (rotation ignored -- fine for blocky collision).
 struct AABB { Vec3 mn, mx; };
 static bool aabbOverlap(Vec3 p, float r, float h, const AABB& b) {
     return p.x + r > b.mn.x && p.x - r < b.mx.x &&
@@ -276,89 +316,90 @@ int main(int, char**) {
     if (!loadGL()) { SDL_Log("failed to load GL functions"); return 1; }
     SDL_SetRelativeMouseMode(SDL_TRUE);
 
-    GLuint vs = compile(GL_VERTEX_SHADER, VS), fs = compile(GL_FRAGMENT_SHADER, FS);
-    GLuint prog = glCreateProgram();
-    glAttachShader(prog, vs); glAttachShader(prog, fs);
-    glLinkProgram(prog);
-    GLint linked = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
-    if (!linked) { char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log); SDL_Log("link: %s", log); return 1; }
-    glUseProgram(prog);
+    GLuint sceneProg = link(VS, SCENE_FS);
+    GLuint fogProg = link(FULL_VS, FOG_FS);
+    GLuint compProg = link(FULL_VS, COMP_FS);
 
-    GLint uMVP = glGetUniformLocation(prog, "uMVP"), uModel = glGetUniformLocation(prog, "uModel");
-    GLint uLightDir = glGetUniformLocation(prog, "uLightDir"), uCam = glGetUniformLocation(prog, "uCam");
-    GLint uTint = glGetUniformLocation(prog, "uTint"), uFogColor = glGetUniformLocation(prog, "uFogColor");
-    GLint uTime = glGetUniformLocation(prog, "uTime"), uFogDensity = glGetUniformLocation(prog, "uFogDensity");
-    GLint uHeightFalloff = glGetUniformLocation(prog, "uHeightFalloff"), uNoiseScale = glGetUniformLocation(prog, "uNoiseScale");
-    GLint uRegFogDensity = glGetUniformLocation(prog, "uRegFogDensity");
-    GLint uSpotPos = glGetUniformLocation(prog, "uSpotPos"), uSpotDir = glGetUniformLocation(prog, "uSpotDir");
-    GLint uSpotCos = glGetUniformLocation(prog, "uSpotCos"), uSpotColor = glGetUniformLocation(prog, "uSpotColor");
-    GLint uSpotIntensity = glGetUniformLocation(prog, "uSpotIntensity");
-    GLint uWindSpeed = glGetUniformLocation(prog, "uWindSpeed");
-    GLint uNumLights = glGetUniformLocation(prog, "uNumLights");
-    GLint uLightPosU = glGetUniformLocation(prog, "uLightPos");
-    GLint uLightColU = glGetUniformLocation(prog, "uLightCol");
-
-    // Room lamps: a few coloured point lights (position xyz, colour rgb).
-    const int NL = 4;
-    float lpos[NL * 3] = { -6.f, 4.f, 12.f,   6.f, 4.f, -2.f,   0.f, 4.f, -16.f,  -1.f, 3.f, 5.f };
-    float lcol[NL * 3] = { 1.0f, 0.7f, 0.4f,  0.5f, 0.7f, 1.0f, 1.0f, 0.8f, 0.5f, 0.7f, 0.85f, 1.0f };
-
-    // Cheap depth-only program for a pre-pass, so the expensive fog shader runs
-    // once per visible pixel instead of once per overlapping surface (overdraw).
-    const char* DEPTH_FS = "#version 330 core\nvoid main(){}\n";
-    GLuint dfs = compile(GL_FRAGMENT_SHADER, DEPTH_FS);
-    GLuint depthProg = glCreateProgram();
-    glAttachShader(depthProg, vs);
-    glAttachShader(depthProg, dfs);
-    glLinkProgram(depthProg);
-    GLint uMVPd = glGetUniformLocation(depthProg, "uMVP");
+    // Scene program uniforms.
+    GLint sMVP = glGetUniformLocation(sceneProg, "uMVP"), sModel = glGetUniformLocation(sceneProg, "uModel");
+    GLint sLightDir = glGetUniformLocation(sceneProg, "uLightDir"), sCam = glGetUniformLocation(sceneProg, "uCam");
+    GLint sTint = glGetUniformLocation(sceneProg, "uTint"), sNumL = glGetUniformLocation(sceneProg, "uNumLights");
+    GLint sLPos = glGetUniformLocation(sceneProg, "uLightPos"), sLCol = glGetUniformLocation(sceneProg, "uLightCol");
+    // Fog program uniforms.
+    GLint fDepth = glGetUniformLocation(fogProg, "uDepth");
+    GLint fCam = glGetUniformLocation(fogProg, "uCam"), fFwd = glGetUniformLocation(fogProg, "uFwd");
+    GLint fRight = glGetUniformLocation(fogProg, "uRight"), fUp = glGetUniformLocation(fogProg, "uUp");
+    GLint fTan = glGetUniformLocation(fogProg, "uTanHalf"), fAspect = glGetUniformLocation(fogProg, "uAspect");
+    GLint fNear = glGetUniformLocation(fogProg, "uNear"), fFar = glGetUniformLocation(fogProg, "uFar");
+    GLint fFogColor = glGetUniformLocation(fogProg, "uFogColor"), fTime = glGetUniformLocation(fogProg, "uTime");
+    GLint fDensity = glGetUniformLocation(fogProg, "uFogDensity"), fHeight = glGetUniformLocation(fogProg, "uHeightFalloff");
+    GLint fNoise = glGetUniformLocation(fogProg, "uNoiseScale"), fReg = glGetUniformLocation(fogProg, "uRegFogDensity");
+    GLint fWind = glGetUniformLocation(fogProg, "uWindSpeed");
+    GLint fSpotPos = glGetUniformLocation(fogProg, "uSpotPos"), fSpotDir = glGetUniformLocation(fogProg, "uSpotDir");
+    GLint fSpotCos = glGetUniformLocation(fogProg, "uSpotCos"), fSpotCol = glGetUniformLocation(fogProg, "uSpotColor");
+    GLint fSpotI = glGetUniformLocation(fogProg, "uSpotIntensity");
+    GLint fNumL = glGetUniformLocation(fogProg, "uNumLights");
+    GLint fLPos = glGetUniformLocation(fogProg, "uLightPos"), fLCol = glGetUniformLocation(fogProg, "uLightCol");
+    // Composite uniforms.
+    GLint cScene = glGetUniformLocation(compProg, "uScene"), cFog = glGetUniformLocation(compProg, "uFog");
 
     Mesh groundM = Mesh::plane(120.f, 60.f), boxM = Mesh::cube();
     GpuMesh ground = upload(groundM), box = upload(boxM);
     std::vector<BoxInst> scene = buildScene();
-
-    // Collision boxes (axis-aligned) from the scene.
     std::vector<AABB> solids;
     for (const BoxInst& b : scene) {
         Vec3 h = b.size * 0.5f;
-        solids.push_back({ {b.pos.x - h.x, b.pos.y - h.y, b.pos.z - h.z},
-                           {b.pos.x + h.x, b.pos.y + h.y, b.pos.z + h.z} });
+        solids.push_back({ {b.pos.x - h.x, b.pos.y - h.y, b.pos.z - h.z}, {b.pos.x + h.x, b.pos.y + h.y, b.pos.z + h.z} });
     }
 
-    glEnable(GL_DEPTH_TEST);
-    Vec3 fogColor{0.62f, 0.63f, 0.66f};
-    Vec3 ld = Vec3{-0.5f, -1.f, -0.4f}.normalized();
+    GLuint emptyVAO; glGenVertexArrays(1, &emptyVAO);
 
-    // Half-resolution fog target: render scene+fog into a smaller framebuffer,
-    // then upscale to the window. ~4x cheaper for the heavy fog shader.
-    GLuint fbo = 0, fboColor = 0, fboDepth = 0; int fboW = 0, fboH = 0;
-    auto ensureFBO = [&](int rw, int rh) {
-        if (fbo && fboW == rw && fboH == rh) return;
-        if (fbo) { glDeleteFramebuffers(1, &fbo); glDeleteTextures(1, &fboColor); glDeleteRenderbuffers(1, &fboDepth); }
-        fboW = rw; fboH = rh;
-        glGenTextures(1, &fboColor);
-        glBindTexture(GL_TEXTURE_2D, fboColor);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, rw, rh, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glGenRenderbuffers(1, &fboDepth);
-        glBindRenderbuffer(GL_RENDERBUFFER, fboDepth);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, rw, rh);
-        glGenFramebuffers(1, &fbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fboColor, 0);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, fboDepth);
+    // FBOs: scene (full res, colour + depth textures) and fog (low res, colour).
+    GLuint sceneFBO = 0, sceneCol = 0, sceneDepth = 0, fogFBO = 0, fogCol = 0;
+    int sW = 0, sH = 0, fW = 0, fH = 0;
+    auto makeTex = [](GLuint& t, int w, int h, GLint ifmt, GLenum fmt, GLenum type, GLint filt) {
+        glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
+        glTexImage2D(GL_TEXTURE_2D, 0, ifmt, w, h, 0, fmt, type, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    };
+    auto ensureScene = [&](int w, int h) {
+        if (sceneFBO && sW == w && sH == h) return;
+        if (sceneFBO) { glDeleteFramebuffers(1, &sceneFBO); glDeleteTextures(1, &sceneCol); glDeleteTextures(1, &sceneDepth); }
+        sW = w; sH = h;
+        makeTex(sceneCol, w, h, GL_RGB8, GL_RGB, GL_UNSIGNED_BYTE, GL_NEAREST);
+        makeTex(sceneDepth, w, h, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, GL_NEAREST);
+        glGenFramebuffers(1, &sceneFBO); glBindFramebuffer(GL_FRAMEBUFFER, sceneFBO);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sceneCol, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, sceneDepth, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    };
+    auto ensureFog = [&](int w, int h) {
+        if (fogFBO && fW == w && fH == h) return;
+        if (fogFBO) { glDeleteFramebuffers(1, &fogFBO); glDeleteTextures(1, &fogCol); }
+        fW = w; fH = h;
+        makeTex(fogCol, w, h, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, GL_LINEAR);
+        glGenFramebuffers(1, &fogFBO); glBindFramebuffer(GL_FRAMEBUFFER, fogFBO);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fogCol, 0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     };
 
-    // Player physics (feet position).
+    Vec3 fogColor{0.62f, 0.63f, 0.66f};
+    Vec3 ld = Vec3{-0.5f, -1.f, -0.4f}.normalized();
+    const int NL = 4;
+    float lpos[NL * 3] = { -6.f, 4.f, 12.f,   6.f, 4.f, -2.f,   0.f, 4.f, -16.f,  -1.f, 3.f, 5.f };
+    float lcol[NL * 3] = { 1.0f, 0.7f, 0.4f,  0.5f, 0.7f, 1.0f, 1.0f, 0.8f, 0.5f, 0.7f, 0.85f, 1.0f };
+
     Vec3 pos{0.f, 0.f, 22.f};
     Vec3 vel{0.f, 0.f, 0.f};
     bool onGround = false;
-    float yaw = 3.14159265f, pitch = 0.f;   // looking -z
+    float yaw = 3.14159265f, pitch = 0.f;
     float fogDensity = 0.6f, noiseScale = 0.31f, regFog = 0.028f, spotI = 0.95f, windSpeed = 2.5f;
-    int renderScale = 2;                     // 1 = full res, 2 = half res (faster)
+    int fogScale = 2;                          // fog rendered at 1/fogScale resolution
     float t = 0.f;
+    const float nearP = 0.1f, farP = 200.f, fovY = 60.f * 3.14159265f / 180.f;
 
     Uint64 prev = SDL_GetPerformanceCounter();
     const double freq = double(SDL_GetPerformanceFrequency());
@@ -391,8 +432,8 @@ int main(int, char**) {
                     case SDLK_7: windSpeed = fmaxf(0.f, windSpeed - 0.5f); break;
                     case SDLK_8: windSpeed += 0.5f; break;
                     case SDLK_SPACE: if (onGround) vel.y = 8.0f; break;
-                    case SDLK_9: renderScale = 1; break;   // full res (sharper)
-                    case SDLK_0: renderScale = 2; break;   // half res (faster)
+                    case SDLK_9: fogScale = 1; break;   // sharper fog
+                    case SDLK_0: fogScale = 3; break;   // faster fog
                 }
             }
         }
@@ -412,11 +453,9 @@ int main(int, char**) {
         if (k[SDL_SCANCODE_D]) wish += right;
         if (k[SDL_SCANCODE_A]) wish = wish - right;
         if (wish.length() > 0.001f) wish = wish.normalized();
-        vel.x = wish.x * spd;
-        vel.z = wish.z * spd;
-        vel.y -= 24.f * dt;                                  // gravity
+        vel.x = wish.x * spd; vel.z = wish.z * spd;
+        vel.y -= 24.f * dt;
 
-        // Integrate + resolve collisions one axis at a time vs the solid boxes.
         pos.x += vel.x * dt;
         for (const AABB& b : solids) if (aabbOverlap(pos, rad, playerH, b)) { pos.x = (vel.x > 0.f ? b.mn.x - rad : b.mx.x + rad); vel.x = 0.f; }
         pos.z += vel.z * dt;
@@ -430,74 +469,80 @@ int main(int, char**) {
         if (pos.y < 0.f) { pos.y = 0.f; vel.y = 0.f; onGround = true; }
         Vec3 eye = pos + Vec3{0.f, eyeH, 0.f};
 
-        int rw = (W / renderScale < 1) ? 1 : W / renderScale;
-        int rh = (H / renderScale < 1) ? 1 : H / renderScale;
-        ensureFBO(rw, rh);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glViewport(0, 0, rw, rh);
-        glClearColor(fogColor.x, fogColor.y, fogColor.z, 1.f);
-        glDepthMask(GL_TRUE);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        ensureScene(W, H);
+        int fw = (W / fogScale < 1) ? 1 : W / fogScale;
+        int fh = (H / fogScale < 1) ? 1 : H / fogScale;
+        ensureFog(fw, fh);
 
-        Mat4 proj = perspective(60.f * 3.14159265f / 180.f, float(W) / float(H), 0.1f, 200.f);
+        Mat4 proj = perspective(fovY, float(W) / float(H), nearP, farP);
         Mat4 view = lookAt(eye, eye + fwd, Vec3{0, 1, 0});
 
-        // Visit every object (ground + scene boxes) with a callback.
-        auto forEach = [&](auto&& fn) {
-            fn(ground, translate({0, 0, 0}), Vec3{0.42f, 0.44f, 0.46f});
-            for (const BoxInst& b : scene)
-                fn(box, translate(b.pos) * rotateY(b.rotY) * scale(b.size), b.tint);
+        // ---- 1) Geometry pass (full res, crisp) ----
+        glBindFramebuffer(GL_FRAMEBUFFER, sceneFBO);
+        glViewport(0, 0, W, H);
+        glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
+        glClearColor(fogColor.x, fogColor.y, fogColor.z, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(sceneProg);
+        glUniform3f(sLightDir, ld.x, ld.y, ld.z);
+        glUniform3f(sCam, eye.x, eye.y, eye.z);
+        glUniform1i(sNumL, NL);
+        glUniform3fv(sLPos, NL, lpos);
+        glUniform3fv(sLCol, NL, lcol);
+        auto drawGeo = [&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
+            Mat4 mvp = proj * view * model;
+            glUniformMatrix4fv(sMVP, 1, GL_TRUE, &mvp.m[0][0]);
+            glUniformMatrix4fv(sModel, 1, GL_TRUE, &model.m[0][0]);
+            glUniform3f(sTint, tint.x, tint.y, tint.z);
+            glBindVertexArray(o.vao);
+            glDrawArrays(GL_TRIANGLES, 0, o.count);
         };
+        drawGeo(ground, translate({0, 0, 0}), {0.42f, 0.44f, 0.46f});
+        for (const BoxInst& b : scene) drawGeo(box, translate(b.pos) * rotateY(b.rotY) * scale(b.size), b.tint);
 
-        // 1) Depth pre-pass -- cheap shader, depth only (no overdraw of fog).
-        glUseProgram(depthProg);
-        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-        glDepthFunc(GL_LESS);
-        forEach([&](const GpuMesh& o, const Mat4& model, Vec3) {
-            Mat4 mvp = proj * view * model;
-            glUniformMatrix4fv(uMVPd, 1, GL_TRUE, &mvp.m[0][0]);
-            glBindVertexArray(o.vao);
-            glDrawArrays(GL_TRIANGLES, 0, o.count);
-        });
+        // ---- 2) Fog pass (low res) ----
+        Vec3 camRight = fwd.cross(Vec3{0, 1, 0}).normalized();
+        Vec3 camUp = camRight.cross(fwd).normalized();
+        glBindFramebuffer(GL_FRAMEBUFFER, fogFBO);
+        glViewport(0, 0, fw, fh);
+        glDisable(GL_DEPTH_TEST);
+        glUseProgram(fogProg);
+        pglActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, sceneDepth);
+        glUniform1i(fDepth, 0);
+        glUniform3f(fCam, eye.x, eye.y, eye.z);
+        glUniform3f(fFwd, fwd.x, fwd.y, fwd.z);
+        glUniform3f(fRight, camRight.x, camRight.y, camRight.z);
+        glUniform3f(fUp, camUp.x, camUp.y, camUp.z);
+        glUniform1f(fTan, std::tan(fovY * 0.5f));
+        glUniform1f(fAspect, float(W) / float(H));
+        glUniform1f(fNear, nearP); glUniform1f(fFar, farP);
+        glUniform3f(fFogColor, fogColor.x, fogColor.y, fogColor.z);
+        glUniform1f(fTime, t);
+        glUniform1f(fDensity, fogDensity);
+        glUniform1f(fHeight, 0.30f);
+        glUniform1f(fNoise, noiseScale);
+        glUniform1f(fReg, regFog);
+        glUniform1f(fWind, windSpeed);
+        glUniform3f(fSpotPos, eye.x, eye.y, eye.z);
+        glUniform3f(fSpotDir, fwd.x, fwd.y, fwd.z);
+        glUniform1f(fSpotCos, std::cos(22.f * 3.14159265f / 180.f));
+        glUniform3f(fSpotCol, 1.0f, 0.95f, 0.82f);
+        glUniform1f(fSpotI, spotI);
+        glUniform1i(fNumL, NL);
+        glUniform3fv(fLPos, NL, lpos);
+        glUniform3fv(fLCol, NL, lcol);
+        glBindVertexArray(emptyVAO);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
 
-        // 2) Colour pass -- fog shader runs only on the visible front pixels.
-        glUseProgram(prog);
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glDepthMask(GL_FALSE);
-        glDepthFunc(GL_LEQUAL);
-        glUniform3f(uLightDir, ld.x, ld.y, ld.z);
-        glUniform3f(uCam, eye.x, eye.y, eye.z);
-        glUniform3f(uFogColor, fogColor.x, fogColor.y, fogColor.z);
-        glUniform1f(uTime, t);
-        glUniform1f(uFogDensity, fogDensity);
-        glUniform1f(uHeightFalloff, 0.30f);
-        glUniform1f(uNoiseScale, noiseScale);
-        glUniform1f(uRegFogDensity, regFog);
-        glUniform3f(uSpotPos, eye.x, eye.y, eye.z);
-        glUniform3f(uSpotDir, fwd.x, fwd.y, fwd.z);
-        glUniform1f(uSpotCos, std::cos(22.f * 3.14159265f / 180.f));
-        glUniform3f(uSpotColor, 1.0f, 0.95f, 0.82f);
-        glUniform1f(uSpotIntensity, spotI);
-        glUniform1f(uWindSpeed, windSpeed);
-        glUniform1i(uNumLights, NL);
-        glUniform3fv(uLightPosU, NL, lpos);
-        glUniform3fv(uLightColU, NL, lcol);
-        forEach([&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
-            Mat4 mvp = proj * view * model;
-            glUniformMatrix4fv(uMVP, 1, GL_TRUE, &mvp.m[0][0]);
-            glUniformMatrix4fv(uModel, 1, GL_TRUE, &model.m[0][0]);
-            glUniform3f(uTint, tint.x, tint.y, tint.z);
-            glBindVertexArray(o.vao);
-            glDrawArrays(GL_TRIANGLES, 0, o.count);
-        });
-        glDepthMask(GL_TRUE);
-        glDepthFunc(GL_LESS);
-
-        // Upscale the half-res render to the window.
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-        glBlitFramebuffer(0, 0, rw, rh, 0, 0, W, H, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        // ---- 3) Composite to the screen (full res) ----
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, W, H);
+        glUseProgram(compProg);
+        pglActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, sceneCol); glUniform1i(cScene, 0);
+        pglActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, fogCol); glUniform1i(cFog, 1);
+        glBindVertexArray(emptyVAO);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
 
         SDL_GL_SwapWindow(win);
     }
