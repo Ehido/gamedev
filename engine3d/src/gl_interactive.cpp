@@ -93,7 +93,7 @@ uniform vec3 uLightCol[8];
 out vec4 frag;
 void main() {
     float c = mod(floor(vUV.x * 8.0) + floor(vUV.y * 8.0), 2.0);
-    vec3 base = mix(uTint * 0.55, uTint, c);
+    vec3 base = mix(uTint * 0.78, uTint, c);   // softer tiling, less programmer-checker
     vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
     if (dot(N, normalize(uCam - vWorld)) < 0.0) N = -N;
     vec3 col = base * (0.3 + 0.85 * max(0.0, dot(N, -normalize(uLightDir))));
@@ -198,7 +198,7 @@ void main() {
         float g = gnoise(p * 0.13 + vec3(uTime * 0.05 * uWindSpeed, 0.0, 0.0));
         vec3 streamShade = vec3(mix(0.30, 0.92, clamp(g * 0.5 + 0.5, 0.0, 1.0)));
         vec3 ambient = mix(uFogColor, streamShade, clamp(streamD / max(med, 1e-4), 0.0, 1.0));
-        vec3 lightCol = ambient + spotInScatter(p);
+        vec3 lightCol = ambient + spotInScatter(p) * 0.3;   // subtler beam (no whiteout)
         for (int li = 0; li < uNumLights; li++) {
             vec3 L = uLightPos[li] - p;
             lightCol += uLightCol[li] * (1.0 / (1.0 + 0.25 * dot(L, L)));
@@ -207,7 +207,7 @@ void main() {
         trans *= (1.0 - a);
         if (trans < 0.03) break;
     }
-    frag = vec4(fogCol, trans);
+    frag = vec4(min(fogCol, vec3(1.0)), trans);   // clamp so the beam can't blow to white
 }
 )";
 
@@ -297,6 +297,10 @@ static bool aabbOverlap(Vec3 p, float r, float h, const AABB& b) {
            p.y + h > b.mn.y && p.y < b.mx.y &&
            p.z + r > b.mn.z && p.z - r < b.mx.z;
 }
+
+// A "monster" -- for now just a moving block that patrols and sends the player
+// back to the start on contact.
+struct Monster { Vec3 pos, vel, size; };
 
 int main(int, char**) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { SDL_Log("SDL init: %s", SDL_GetError()); return 1; }
@@ -395,8 +399,18 @@ int main(int, char**) {
     Vec3 pos{0.f, 0.f, 22.f};
     Vec3 vel{0.f, 0.f, 0.f};
     bool onGround = false;
+    const Vec3 spawnPos{0.f, 0.f, 22.f};
+
+    // Monsters: patrolling blocks. Touch one and you're sent back to the start.
+    // Reaching the exit (far end) advances the level and adds another monster.
+    std::vector<Monster> monsters;
+    auto addMonster = [&](float x, float z, Vec3 v) { monsters.push_back({ {x, 0.9f, z}, v, {1.4f, 1.8f, 1.4f} }); };
+    addMonster(-4.f, 2.f, {0.f, 0.f, 4.5f});
+    addMonster(4.f, -10.f, {0.f, 0.f, -5.5f});
+    addMonster(0.f, -22.f, {3.5f, 0.f, 0.f});
+    int level = 1;
     float yaw = 3.14159265f, pitch = 0.f;
-    float fogDensity = 0.6f, noiseScale = 0.31f, regFog = 0.028f, spotI = 0.95f, windSpeed = 2.5f;
+    float fogDensity = 0.6f, noiseScale = 0.31f, regFog = 0.028f, spotI = 0.7f, windSpeed = 2.5f;
     int fogScale = 2;                          // fog rendered at 1/fogScale resolution
     float t = 0.f;
     const float nearP = 0.1f, farP = 200.f, fovY = 60.f * 3.14159265f / 180.f;
@@ -422,7 +436,7 @@ int main(int, char**) {
             } else if (e.type == SDL_KEYDOWN) {
                 switch (e.key.keysym.sym) {
                     case SDLK_ESCAPE: running = false; break;
-                    case SDLK_f: spotI = (spotI > 0.f ? 0.f : 0.95f); break;
+                    case SDLK_f: spotI = (spotI > 0.f ? 0.f : 0.7f); break;
                     case SDLK_1: regFog = fmaxf(0.f, regFog - 0.004f); break;
                     case SDLK_2: regFog += 0.004f; break;
                     case SDLK_3: fogDensity = fmaxf(0.f, fogDensity - 0.05f); break;
@@ -467,6 +481,25 @@ int main(int, char**) {
             vel.y = 0.f;
         }
         if (pos.y < 0.f) { pos.y = 0.f; vel.y = 0.f; onGround = true; }
+
+        // Monsters move + bounce; touching one reverts you to the start.
+        for (Monster& m : monsters) {
+            m.pos = m.pos + m.vel * dt;
+            if (m.pos.z > 26.f) { m.pos.z = 26.f; m.vel.z = -fabsf(m.vel.z); }
+            if (m.pos.z < -36.f) { m.pos.z = -36.f; m.vel.z = fabsf(m.vel.z); }
+            if (m.pos.x > 9.f) { m.pos.x = 9.f; m.vel.x = -fabsf(m.vel.x); }
+            if (m.pos.x < -9.f) { m.pos.x = -9.f; m.vel.x = fabsf(m.vel.x); }
+            Vec3 hs = m.size * 0.5f;
+            AABB mb{ {m.pos.x - hs.x, m.pos.y - hs.y, m.pos.z - hs.z}, {m.pos.x + hs.x, m.pos.y + hs.y, m.pos.z + hs.z} };
+            if (aabbOverlap(pos, rad, playerH, mb)) { pos = spawnPos; vel = Vec3{0, 0, 0}; }
+        }
+        // Reached the exit at the far end? Escaped -> next level, one more monster.
+        if (pos.z < -34.f && fabsf(pos.x) < 3.f) {
+            ++level;
+            addMonster(level % 2 ? -6.f : 6.f, 0.f, {0.f, 0.f, level % 2 ? 5.f : -5.f});
+            pos = spawnPos; vel = Vec3{0, 0, 0};
+        }
+
         Vec3 eye = pos + Vec3{0.f, eyeH, 0.f};
 
         ensureScene(W, H);
@@ -499,6 +532,8 @@ int main(int, char**) {
         };
         drawGeo(ground, translate({0, 0, 0}), {0.42f, 0.44f, 0.46f});
         for (const BoxInst& b : scene) drawGeo(box, translate(b.pos) * rotateY(b.rotY) * scale(b.size), b.tint);
+        for (const Monster& m : monsters) drawGeo(box, translate(m.pos) * scale(m.size), {0.85f, 0.15f, 0.13f});
+        drawGeo(box, translate({0.f, 1.2f, -36.f}) * scale({4.f, 2.4f, 0.4f}), {0.2f, 0.9f, 0.35f});  // exit
 
         // ---- 2) Fog pass (low res) ----
         Vec3 camRight = fwd.cross(Vec3{0, 1, 0}).normalized();
