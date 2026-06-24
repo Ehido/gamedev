@@ -36,6 +36,8 @@
     X(PFNGLUNIFORMMATRIX4FVPROC, glUniformMatrix4fv) \
     X(PFNGLUNIFORM3FPROC, glUniform3f) \
     X(PFNGLUNIFORM1FPROC, glUniform1f) \
+    X(PFNGLUNIFORM1IPROC, glUniform1i) \
+    X(PFNGLUNIFORM3FVPROC, glUniform3fv) \
     X(PFNGLGENFRAMEBUFFERSPROC, glGenFramebuffers) \
     X(PFNGLBINDFRAMEBUFFERPROC, glBindFramebuffer) \
     X(PFNGLFRAMEBUFFERTEXTURE2DPROC, glFramebufferTexture2D) \
@@ -93,6 +95,9 @@ uniform float uSpotCos;
 uniform vec3 uSpotColor;
 uniform float uSpotIntensity;
 uniform float uWindSpeed;
+uniform int uNumLights;
+uniform vec3 uLightPos[8];
+uniform vec3 uLightCol[8];
 out vec4 frag;
 
 vec3 hash3(vec3 p) {
@@ -146,6 +151,13 @@ void main() {
     if (dot(N, normalize(uCam - vWorld)) < 0.0) N = -N;
     float lit = 0.3 + 0.85 * max(0.0, dot(N, -normalize(uLightDir)));
     vec3 col = base * lit;
+    // Coloured point lights (room lamps) lighting the surfaces.
+    for (int i = 0; i < uNumLights; i++) {
+        vec3 L = uLightPos[i] - vWorld;
+        float d = length(L);
+        float att = 1.0 / (1.0 + 0.15 * d * d);
+        col += base * uLightCol[i] * (max(0.0, dot(N, L / max(d, 1e-4))) * att);
+    }
 
     vec3 rd = vWorld - uCam;
     float dist = length(rd);
@@ -164,6 +176,10 @@ void main() {
         vec3 streamShade = vec3(mix(0.30, 0.92, clamp(g * 0.5 + 0.5, 0.0, 1.0)));
         vec3 ambient = mix(uFogColor, streamShade, clamp(streamD / max(med, 1e-4), 0.0, 1.0));
         vec3 lightCol = ambient + spotInScatter(p);
+        for (int li = 0; li < uNumLights; li++) {   // lamps glow in the fog
+            vec3 L = uLightPos[li] - p;
+            lightCol += uLightCol[li] * (1.0 / (1.0 + 0.25 * dot(L, L)));
+        }
         fogCol += trans * a * lightCol;
         trans *= (1.0 - a);
         if (trans < 0.03) break;                 // stop once fully fogged (perf)
@@ -210,7 +226,9 @@ static std::vector<BoxInst> buildScene() {
     const float zb = -38.f, zf = 30.f, zc = (zb + zf) * 0.5f, zl = zf - zb;
     add({-11.f, 3.f, zc}, {1.f, 6.f, zl}, wall);
     add({11.f, 3.f, zc}, {1.f, 6.f, zl}, wall);
-    add({0.f, 3.f, zb}, {22.f, 6.f, 1.f}, wall);
+    add({0.f, 3.f, zb}, {22.f, 6.f, 1.f}, wall);     // back wall
+    add({0.f, 3.f, zf}, {22.f, 6.f, 1.f}, wall);     // front wall (enclose)
+    add({0.f, 6.2f, zc}, {22.f, 1.f, zl}, wall);     // ceiling
     for (float z = zf - 6.f; z > zb + 4.f; z -= 8.f) {
         add({-6.f, 2.5f, z}, {1.4f, 5.f, 1.4f}, pillar);
         add({6.f, 2.5f, z}, {1.4f, 5.f, 1.4f}, pillar);
@@ -276,6 +294,14 @@ int main(int, char**) {
     GLint uSpotCos = glGetUniformLocation(prog, "uSpotCos"), uSpotColor = glGetUniformLocation(prog, "uSpotColor");
     GLint uSpotIntensity = glGetUniformLocation(prog, "uSpotIntensity");
     GLint uWindSpeed = glGetUniformLocation(prog, "uWindSpeed");
+    GLint uNumLights = glGetUniformLocation(prog, "uNumLights");
+    GLint uLightPosU = glGetUniformLocation(prog, "uLightPos");
+    GLint uLightColU = glGetUniformLocation(prog, "uLightCol");
+
+    // Room lamps: a few coloured point lights (position xyz, colour rgb).
+    const int NL = 4;
+    float lpos[NL * 3] = { -6.f, 4.f, 12.f,   6.f, 4.f, -2.f,   0.f, 4.f, -16.f,  -1.f, 3.f, 5.f };
+    float lcol[NL * 3] = { 1.0f, 0.7f, 0.4f,  0.5f, 0.7f, 1.0f, 1.0f, 0.8f, 0.5f, 0.7f, 0.85f, 1.0f };
 
     // Cheap depth-only program for a pre-pass, so the expensive fog shader runs
     // once per visible pixel instead of once per overlapping surface (overdraw).
@@ -453,6 +479,9 @@ int main(int, char**) {
         glUniform3f(uSpotColor, 1.0f, 0.95f, 0.82f);
         glUniform1f(uSpotIntensity, spotI);
         glUniform1f(uWindSpeed, windSpeed);
+        glUniform1i(uNumLights, NL);
+        glUniform3fv(uLightPosU, NL, lpos);
+        glUniform3fv(uLightColU, NL, lcol);
         forEach([&](const GpuMesh& o, const Mat4& model, Vec3 tint) {
             Mat4 mvp = proj * view * model;
             glUniformMatrix4fv(uMVP, 1, GL_TRUE, &mvp.m[0][0]);
