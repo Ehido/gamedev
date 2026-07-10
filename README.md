@@ -1,24 +1,34 @@
 # gamedev
 
-A from-scratch C++ game engine and the games built on it. Lives alongside the
-unrelated data-scraper in this repo but is fully self-contained.
+A from-scratch C++ game engine (2D **and** 3D), plus the games and prototypes
+built on it. Extracted into its own repo from the Velocitry-data experiment.
 
 ## Layout
 
 ```
-gamedev/
-├── engine/          # reusable engine (game loop, renderer, input, fonts, math)
-│   ├── include/engine/   public headers
-│   └── src/              implementation
-└── games/
-    └── haul/        # HAUL — a co-op scavenger game (work in progress)
+engine/      # 2D engine — game loop, renderer, input, fonts, math (thin layer over SDL2)
+engine3d/    # 3D engine — software rasteriser + OpenGL ES backend, volumetric fog, first-person walk
+games/
+├── haul/    # HAUL — a co-op scavenger game (C++/SDL2)
+└── murk/    # MURK — a 3D fog-scavenger built in Godot 4
 ```
 
-The engine is a thin layer over **SDL2** (window, input, audio, GPU access) with
-everything above it — the fixed-timestep game loop, rendering abstraction,
-entities, math — written from scratch. The fixed timestep is deliberate: it
-keeps the simulation deterministic, which is the foundation for networked
-multiplayer + proximity voice later.
+## Downloads
+
+Playable builds and demo clips are published on the
+[Releases page](https://github.com/Ehido/gamedev/releases/latest):
+
+- **MURK.exe** — the Godot MURK build (Windows)
+- **MURK_walk.zip** — the engine3d first-person fog walkthrough (Windows)
+- Demo GIFs of the engine3d volumetric fog, light shafts, and scene flythrough
+
+Prebuilt binaries are intentionally **not** committed to the repo — they live as
+Release assets so the source tree stays small.
+
+## Screenshots
+
+Stills live in [`engine3d/renders/`](engine3d/renders) — software vs OpenGL
+scenes, the volumetric-fog variation grid, and light-shaft frames.
 
 ## HAUL
 
@@ -35,9 +45,9 @@ Requires a C++17 compiler, CMake, and SDL2 + SDL2_image + SDL2_ttf dev packages:
 sudo apt-get install -y build-essential cmake \
     libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
 
-cmake -S gamedev -B gamedev/build
-cmake --build gamedev/build -j
-./gamedev/build/games/haul/haul
+cmake -S . -B build
+cmake --build build -j
+./build/games/haul/haul
 ```
 
 Controls: **WASD / arrows** to move, walk over loot to grab it, stand on the
@@ -48,10 +58,10 @@ green **EXTRACT** zone to bank it, **Esc** to quit.
 The engine can render offscreen (no display needed):
 
 ```sh
-./gamedev/build/games/haul/haul --screenshot frame.png       # one frame to PNG
-./gamedev/build/games/haul/haul --demo --screenshot f.png    # let a bot play first
-./gamedev/build/games/haul/haul --demo --frames 600 --screenshot f.png  # bot runs N steps
-./gamedev/build/games/haul/haul --faces --screenshot f.png   # the reactive-face gallery
+./build/games/haul/haul --screenshot frame.png       # one frame to PNG
+./build/games/haul/haul --demo --screenshot f.png    # let a bot play first
+./build/games/haul/haul --demo --frames 600 --screenshot f.png  # bot runs N steps
+./build/games/haul/haul --faces --screenshot f.png   # the reactive-face gallery
 ```
 
 The character has a reactive face (a portrait in the top-right corner) that
